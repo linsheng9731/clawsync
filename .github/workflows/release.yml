@@ -25,6 +25,11 @@ jobs:
             arch: x64
             target: node20-macos-x64
             archive_ext: tar.gz
+          - os: macos-latest
+            platform: macos
+            arch: arm64
+            target: node20-macos-arm64
+            archive_ext: tar.gz
           - os: windows-latest
             platform: windows
             arch: x64

@@ -26,9 +26,10 @@ normalize_os() {
 normalize_arch() {
   case "$(uname -m)" in
     x86_64|amd64) echo "x64" ;;
+    arm64|aarch64) echo "arm64" ;;
     *)
       echo "unsupported architecture: $(uname -m)" >&2
-      echo "currently supported: x64" >&2
+      echo "currently supported: x64, arm64" >&2
       exit 1
       ;;
   esac

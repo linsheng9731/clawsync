@@ -37,10 +37,12 @@ This repository includes workflow `.github/workflows/release.yml`.
 - Release assets include prebuilt binaries:
   - `clawsync-<version>-linux-x64.tar.gz`
   - `clawsync-<version>-macos-x64.tar.gz`
+  - `clawsync-<version>-macos-arm64.tar.gz`
   - `clawsync-<version>-windows-x64.zip`
 - Latest aliases are also uploaded for the installer script:
   - `clawsync-latest-linux-x64.tar.gz`
   - `clawsync-latest-macos-x64.tar.gz`
+  - `clawsync-latest-macos-arm64.tar.gz`
   - `clawsync-latest-windows-x64.zip`
 
 Example:

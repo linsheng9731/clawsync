@@ -179,7 +179,7 @@ function printMergeReport(report?: MergeReport): void {
 program
   .name("clawsync")
   .description("Sync OpenClaw config/state to directory, S3, or Git")
-  .version("0.1.0");
+  .version("0.1.1");
 
 commonOptions(
   program
