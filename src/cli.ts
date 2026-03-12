@@ -261,7 +261,18 @@ async function chooseLargestItemsToIgnore(
 program
   .name("clawsync")
   .description("Sync OpenClaw config/state to directory, S3, or Git")
-  .version("0.1.1");
+  .version("0.1.1", "--version", "output the current version");
+
+program
+  .command("version")
+  .description("Show version information")
+  .option("-v, --verbose", "show runtime details")
+  .action((opts) => {
+    console.log("clawsync 0.1.1");
+    if (!opts.verbose) return;
+    console.log(`node: ${process.version}`);
+    console.log(`platform: ${process.platform}/${process.arch}`);
+  });
 
 commonOptions(
   program

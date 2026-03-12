@@ -81,6 +81,18 @@ test("scope shows default selected components", async () => {
   assert.match(result.stdout, /\[workspace\] workspace/);
 });
 
+test("version command supports -v and verbose output", async () => {
+  const shortVersion = await runCli(["--version"]);
+  assert.equal(shortVersion.code, 0, shortVersion.stderr);
+  assert.match(shortVersion.stdout, /0\.1\.1/);
+
+  const verboseVersion = await runCli(["version", "-v"]);
+  assert.equal(verboseVersion.code, 0, verboseVersion.stderr);
+  assert.match(verboseVersion.stdout, /clawsync 0\.1\.1/);
+  assert.match(verboseVersion.stdout, /node:\s+v\d+\.\d+\.\d+/);
+  assert.match(verboseVersion.stdout, /platform:\s+\w+\/\w+/);
+});
+
 test("pack/unpack sanitizes secrets and generates env scripts", async () => {
   const stateDir = await mkTmpDir("pack");
   const outDir = await mkTmpDir("pack-out");

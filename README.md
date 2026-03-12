@@ -64,12 +64,19 @@ clawsync <command> --help
 
 ### Global options (where applicable)
 
+- `--version`: print current clawsync version
 - `--state-dir <path>`: OpenClaw state directory (default `~/.openclaw` or `OPENCLAW_STATE_DIR`)
 - `--config <path>`: custom sync config file path
 - `--include <list>`: comma-separated components to include
 - `--exclude <list>`: comma-separated components to exclude
 - `--ignore-paths <list>`: comma-separated relative paths to ignore (supports files or directories)
 - `--no-sanitize`: disable secret placeholder replacement
+
+### `clawsync version`
+
+Prints version information.
+
+- `-v, --verbose`: includes runtime details (Node.js and platform)
 
 ### `clawsync scope`
 
