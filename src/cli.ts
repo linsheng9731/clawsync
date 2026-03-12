@@ -2,10 +2,11 @@
 import os from "node:os";
 import path from "node:path";
 import fs from "fs-extra";
+import * as readline from "node:readline/promises";
 import { Command } from "commander";
 import { buildSyncConfig, listComponents, resolveStateDir } from "./config.js";
 import { resolveEntries } from "./scope.js";
-import { packState, previewPackState, unpackState } from "./archive.js";
+import { packState, previewPackState, scanPackState, unpackState } from "./archive.js";
 import { pushToDir, resolveFromDir } from "./backends/dir.js";
 import { pushToS3, pullFromS3 } from "./backends/s3.js";
 import { pushToGit, pullFromGit } from "./backends/git.js";
@@ -17,7 +18,7 @@ import {
   parseInterval,
   removeCronJob,
 } from "./scheduler/cron.js";
-import type { MergeReport, UnpackStrategy } from "./types.js";
+import type { Manifest, MergeReport, UnpackStrategy } from "./types.js";
 
 const program = new Command();
 
@@ -27,6 +28,7 @@ function commonOptions(cmd: Command): Command {
     .option("--config <path>", "sync config file path")
     .option("--include <list>", `components to include: ${listComponents().join(",")}`)
     .option("--exclude <list>", `components to exclude: ${listComponents().join(",")}`)
+    .option("--ignore-paths <list>", "comma-separated relative paths to ignore, e.g. workspace/cache,media")
     .option("--no-sanitize", "disable sensitive value replacement in sync package");
 }
 
@@ -52,6 +54,7 @@ function buildPushArgsFromOptions(opts: {
   config?: string;
   include?: string;
   exclude?: string;
+  ignorePaths?: string;
   sanitize?: boolean;
   toDir?: string;
   toS3?: string;
@@ -67,6 +70,7 @@ function buildPushArgsFromOptions(opts: {
   appendArg(args, "--config", opts.config);
   appendArg(args, "--include", opts.include);
   appendArg(args, "--exclude", opts.exclude);
+  appendArg(args, "--ignore-paths", opts.ignorePaths);
   if (opts.sanitize === false) args.push("--no-sanitize");
 
   appendArg(args, "--to-dir", opts.toDir);
@@ -91,6 +95,7 @@ function buildScheduleHintCommand(opts: {
   config?: string;
   include?: string;
   exclude?: string;
+  ignorePaths?: string;
   sanitize?: boolean;
   toDir?: string;
   toS3?: string;
@@ -111,6 +116,7 @@ async function maybePrintScheduleGuidance(opts: {
   config?: string;
   include?: string;
   exclude?: string;
+  ignorePaths?: string;
   sanitize?: boolean;
   toDir?: string;
   toS3?: string;
@@ -176,6 +182,82 @@ function printMergeReport(report?: MergeReport): void {
   }
 }
 
+function printPackReport(archivePath: string, manifest: Manifest): void {
+  console.log("## Pack Report");
+  console.log(`- Archive: ${archivePath}`);
+  console.log(`- Total files: ${manifest.files.length}`);
+  console.log(`- Sanitized: ${manifest.sanitized ? "yes" : "no"}`);
+  console.log(`- Env vars captured: ${manifest.envVars.length}`);
+  console.log("### File Details");
+  for (const item of manifest.files) {
+    console.log(`- ${item}`);
+  }
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = bytes / 1024;
+  let idx = 0;
+  while (value >= 1024 && idx < units.length - 1) {
+    value /= 1024;
+    idx += 1;
+  }
+  return `${value.toFixed(2)} ${units[idx]}`;
+}
+
+function printScanSummary(report: Awaited<ReturnType<typeof scanPackState>>): void {
+  console.log("## Scan Summary");
+  console.log(`- Scanned files: ${report.scannedFiles}`);
+  console.log(`- Scanned size: ${formatBytes(report.scannedBytes)}`);
+  console.log(`- Ignored by config: ${report.ignoredFiles} (${formatBytes(report.ignoredBytes)})`);
+  console.log(`- Selected to sync: ${report.selectedFiles} (${formatBytes(report.selectedBytes)})`);
+  if (report.largestItems.length > 0) {
+    console.log("### Largest Items");
+    report.largestItems.forEach((item, idx) => {
+      console.log(`${idx + 1}. ${item.relPath} (${formatBytes(item.sizeBytes)}) [${item.component}]`);
+    });
+  }
+}
+
+function parseSelectedIndexes(raw: string, max: number): number[] {
+  const tokens = raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const indexes: number[] = [];
+  for (const token of tokens) {
+    const value = Number(token);
+    if (!Number.isInteger(value) || value < 1 || value > max) {
+      throw new Error(`Invalid index: ${token}. Enter numbers between 1 and ${max}.`);
+    }
+    indexes.push(value - 1);
+  }
+  return Array.from(new Set(indexes));
+}
+
+async function chooseLargestItemsToIgnore(
+  largestItems: Array<{ relPath: string; sizeBytes: number; component: string }>,
+): Promise<string[]> {
+  if (largestItems.length === 0) return [];
+  if (!process.stdin.isTTY || !process.stdout.isTTY) return [];
+
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  try {
+    const answer = await rl.question(
+      "Ignore any largest items from this sync? Input indexes (comma-separated), or press Enter to sync all: ",
+    );
+    if (!answer.trim()) return [];
+    const indexes = parseSelectedIndexes(answer, largestItems.length);
+    return indexes.map((idx) => largestItems[idx].relPath);
+  } finally {
+    rl.close();
+  }
+}
+
 program
   .name("clawsync")
   .description("Sync OpenClaw config/state to directory, S3, or Git")
@@ -203,11 +285,31 @@ commonOptions(
     .option("--dry-run", "preview selected files and sanitization without writing archive")
 ).action(async (opts) => {
   const cfg = await buildSyncConfig(opts);
+  console.log("scanning files before pack...");
+  const scanReport = await scanPackState(cfg, {
+    topN: 8,
+    onProgress: (item, ignored) => {
+      const flag = ignored ? "ignored" : "selected";
+      console.log(`scan: ${item.relPath} (${formatBytes(item.sizeBytes)}) [${flag}]`);
+    },
+  });
+  printScanSummary(scanReport);
+
+  let runtimeIgnorePaths = [...cfg.ignorePaths];
+  if (!opts.dryRun) {
+    const chosenToIgnore = await chooseLargestItemsToIgnore(scanReport.largestItems);
+    if (chosenToIgnore.length > 0) {
+      runtimeIgnorePaths = Array.from(new Set([...runtimeIgnorePaths, ...chosenToIgnore]));
+      console.log(`ignore for current run: ${chosenToIgnore.join(", ")}`);
+    }
+  }
+  const runCfg = { ...cfg, ignorePaths: runtimeIgnorePaths };
+
   if (opts.dryRun) {
-    const preview = await previewPackState(cfg);
+    const preview = await previewPackState(runCfg);
     console.log("dry-run mode");
-    console.log(`stateDir: ${cfg.stateDir}`);
-    console.log(`sanitize: ${cfg.sanitize ? "on" : "off"}`);
+    console.log(`stateDir: ${runCfg.stateDir}`);
+    console.log(`sanitize: ${runCfg.sanitize ? "on" : "off"}`);
     console.log(`files: ${preview.files.length}`);
     for (const file of preview.files) console.log(`- ${file}`);
     console.log(`sanitized: ${preview.sanitized ? "yes" : "no"}`);
@@ -217,9 +319,8 @@ commonOptions(
     }
     return;
   }
-  const result = await packState(cfg, opts.out);
-  console.log(`archive: ${result.archivePath}`);
-  console.log(`files: ${result.manifest.files.length}`);
+  const result = await packState(runCfg, opts.out);
+  printPackReport(result.archivePath, result.manifest);
 });
 
 program

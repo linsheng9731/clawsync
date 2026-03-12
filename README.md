@@ -4,21 +4,23 @@ Sync OpenClaw state across machines through local directory, S3-compatible objec
 
 ## Installation
 
-### One-click install from GitHub Releases (macOS/Linux, x64)
+### One-click install from GitHub Releases (macOS/Linux, x64/arm64)
 
-Set your repository (`owner/repo`) then run:
+Install latest:
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/<owner>/<repo>/main/scripts/install.sh" | CLAWSYNC_GH_REPO="<owner>/<repo>" bash
+curl -fsSL "https://raw.githubusercontent.com/linsheng9731/clawsync/main/scripts/install.sh" | CLAWSYNC_GH_REPO="linsheng9731/clawsync" bash
 ```
 
 Install a specific version:
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/<owner>/<repo>/main/scripts/install.sh" | CLAWSYNC_GH_REPO="<owner>/<repo>" bash -s -- v0.1.0
+curl -fsSL "https://raw.githubusercontent.com/linsheng9731/clawsync/main/scripts/install.sh" | CLAWSYNC_GH_REPO="linsheng9731/clawsync" bash -s -- v0.1.1
 ```
 
 Default install path is `~/.local/bin/clawsync`. You can override with `CLAWSYNC_INSTALL_DIR`.
+
+If you see `404`, check whether you used placeholder values like `<owner>/<repo>`.
 
 ### Local development install
 
@@ -66,6 +68,7 @@ clawsync <command> --help
 - `--config <path>`: custom sync config file path
 - `--include <list>`: comma-separated components to include
 - `--exclude <list>`: comma-separated components to exclude
+- `--ignore-paths <list>`: comma-separated relative paths to ignore (supports files or directories)
 - `--no-sanitize`: disable secret placeholder replacement
 
 ### `clawsync scope`
@@ -85,6 +88,8 @@ Creates a `tar.gz` archive from selected state files.
 
 - `--out <dir>`: output directory for the generated archive
 - `--dry-run`: preview selected files and sanitization result without writing archive
+- Before packing, CLI scans file sizes and prints scan progress/summary plus largest items.
+- In interactive terminal, you can choose largest items to ignore for current run.
 
 ```bash
 clawsync pack --out ./backup
@@ -154,6 +159,7 @@ Installs or updates a managed cron job that periodically runs `clawsync push`.
 
 - `--every <interval>` (required): interval format (`30m`, `2h`, `1d`)
 - push target and options: same as `clawsync push` target/backend flags
+- `--ignore-paths`: can be set here so scheduled sync keeps ignoring those paths
 
 ```bash
 clawsync schedule install --every 1d --to-dir ./backup

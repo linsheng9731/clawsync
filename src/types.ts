@@ -10,6 +10,7 @@ export interface SyncConfig {
   stateDir: string;
   include: SyncComponent[];
   exclude: SyncComponent[];
+  ignorePaths: string[];
   strategy: UnpackStrategy;
   format: "tar";
   sanitize: boolean;
@@ -27,6 +28,7 @@ export interface Manifest {
   stateDir: string;
   include: SyncComponent[];
   exclude: SyncComponent[];
+  ignorePaths?: string[];
   files: string[];
   sanitized: boolean;
   envVars: string[];

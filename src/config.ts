@@ -18,6 +18,7 @@ const DEFAULT_EXCLUDE: SyncComponent[] = ["credentials", "sessions", "tools", "m
 interface FileConfig {
   include?: SyncComponent[];
   exclude?: SyncComponent[];
+  ignorePaths?: string[];
   stateDir?: string;
   strategy?: UnpackStrategy;
   sanitize?: boolean;
@@ -56,20 +57,38 @@ function parseComponents(raw?: string): SyncComponent[] | undefined {
   return tokens as SyncComponent[];
 }
 
+function normalizeRelativePath(input: string): string {
+  const trimmed = input.trim();
+  const noLeadingDot = trimmed.replace(/^\.\//, "");
+  return noLeadingDot.replaceAll("\\", "/").replace(/\/+$/, "");
+}
+
+function parseIgnorePaths(raw?: string): string[] | undefined {
+  if (!raw) return undefined;
+  const tokens = raw
+    .split(",")
+    .map(normalizeRelativePath)
+    .filter(Boolean);
+  return Array.from(new Set(tokens));
+}
+
 export async function buildSyncConfig(options: {
   stateDir?: string;
   config?: string;
   include?: string;
   exclude?: string;
+  ignorePaths?: string;
   strategy?: UnpackStrategy;
   sanitize?: boolean;
 }): Promise<SyncConfig> {
   const fileConfig = await loadConfigFile(options.config);
   const includeFromCli = parseComponents(options.include);
   const excludeFromCli = parseComponents(options.exclude);
+  const ignorePathsFromCli = parseIgnorePaths(options.ignorePaths);
 
   const include = includeFromCli ?? fileConfig.include ?? DEFAULT_INCLUDE;
   const exclude = excludeFromCli ?? fileConfig.exclude ?? DEFAULT_EXCLUDE;
+  const ignorePaths = ignorePathsFromCli ?? fileConfig.ignorePaths ?? [];
   const strategy = options.strategy ?? fileConfig.strategy ?? "overwrite";
   const sanitize = options.sanitize ?? fileConfig.sanitize ?? true;
 
@@ -77,6 +96,7 @@ export async function buildSyncConfig(options: {
     stateDir: resolveStateDir(options.stateDir ?? fileConfig.stateDir),
     include,
     exclude,
+    ignorePaths,
     strategy,
     format: "tar",
     sanitize,

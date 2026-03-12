@@ -8,13 +8,118 @@ import type {
   Manifest,
   MergeConflictItem,
   MergeReport,
+  ScopeEntry,
   SyncConfig,
+  SyncComponent,
   UnpackResult,
   UnpackStrategy,
 } from "./types.js";
 
 function timestamp(): string {
   return new Date().toISOString().replace(/[:.]/g, "-");
+}
+
+function toPortablePath(relPath: string): string {
+  return relPath.split(path.sep).join("/");
+}
+
+function toFsPath(relPath: string): string {
+  return relPath.split("/").join(path.sep);
+}
+
+function normalizeRelativePath(input: string): string {
+  return input.replace(/^\.\//, "").replaceAll("\\", "/").replace(/\/+$/, "");
+}
+
+function isIgnoredPath(relPath: string, ignorePaths: string[]): boolean {
+  if (ignorePaths.length === 0) return false;
+  const normalizedPath = normalizeRelativePath(relPath);
+  return ignorePaths.some((raw) => {
+    const normalizedIgnore = normalizeRelativePath(raw);
+    if (!normalizedIgnore) return false;
+    if (normalizedPath === normalizedIgnore) return true;
+    return normalizedPath.startsWith(`${normalizedIgnore}/`);
+  });
+}
+
+export interface PackScanItem {
+  component: SyncComponent;
+  relPath: string;
+  sizeBytes: number;
+}
+
+export interface PackScanSummary {
+  scannedFiles: number;
+  scannedBytes: number;
+  ignoredFiles: number;
+  ignoredBytes: number;
+  selectedFiles: number;
+  selectedBytes: number;
+  largestItems: PackScanItem[];
+}
+
+async function collectEntryFiles(baseDir: string, entry: ScopeEntry, relPath = entry.relPath): Promise<PackScanItem[]> {
+  const fullPath = path.join(baseDir, relPath);
+  const stat = await fs.stat(fullPath);
+  if (stat.isFile()) {
+    return [{ component: entry.component, relPath: toPortablePath(relPath), sizeBytes: stat.size }];
+  }
+  if (!stat.isDirectory()) {
+    return [];
+  }
+
+  const children = await fs.readdir(fullPath);
+  const files: PackScanItem[] = [];
+  for (const child of children) {
+    files.push(...(await collectEntryFiles(baseDir, entry, path.join(relPath, child))));
+  }
+  return files;
+}
+
+async function collectScannedFiles(config: SyncConfig): Promise<PackScanItem[]> {
+  const entries = await resolveExistingPaths(config);
+  const scanned: PackScanItem[] = [];
+  for (const entry of entries) {
+    scanned.push(...(await collectEntryFiles(config.stateDir, entry)));
+  }
+  return scanned;
+}
+
+function summarizePackScan(scanned: PackScanItem[], ignorePaths: string[], topN: number): {
+  summary: PackScanSummary;
+  selectedItems: PackScanItem[];
+  ignoredItems: PackScanItem[];
+} {
+  const ignoredItems = scanned.filter((item) => isIgnoredPath(item.relPath, ignorePaths));
+  const selectedItems = scanned.filter((item) => !isIgnoredPath(item.relPath, ignorePaths));
+  const bySizeDesc = [...selectedItems].sort((a, b) => b.sizeBytes - a.sizeBytes);
+
+  const sumBytes = (items: PackScanItem[]): number => items.reduce((acc, item) => acc + item.sizeBytes, 0);
+  const summary: PackScanSummary = {
+    scannedFiles: scanned.length,
+    scannedBytes: sumBytes(scanned),
+    ignoredFiles: ignoredItems.length,
+    ignoredBytes: sumBytes(ignoredItems),
+    selectedFiles: selectedItems.length,
+    selectedBytes: sumBytes(selectedItems),
+    largestItems: bySizeDesc.slice(0, Math.max(0, topN)),
+  };
+  return { summary, selectedItems, ignoredItems };
+}
+
+export async function scanPackState(
+  config: SyncConfig,
+  options?: {
+    topN?: number;
+    onProgress?: (item: PackScanItem, ignored: boolean) => void;
+  },
+): Promise<PackScanSummary> {
+  const scanned = await collectScannedFiles(config);
+  for (const item of scanned) {
+    options?.onProgress?.(item, isIgnoredPath(item.relPath, config.ignorePaths));
+  }
+  const { summary } = summarizePackScan(scanned, config.ignorePaths, options?.topN ?? 5);
+  return summary;
 }
 
 export interface PreviewResult {
@@ -24,17 +129,20 @@ export interface PreviewResult {
 }
 
 export async function previewPackState(config: SyncConfig): Promise<PreviewResult> {
-  const entries = await resolveExistingPaths(config);
+  const scanned = await collectScannedFiles(config);
+  const { selectedItems } = summarizePackScan(scanned, config.ignorePaths, 0);
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "clawsync-preview-"));
   const payload = path.join(tempRoot, "payload");
   await fs.ensureDir(payload);
 
   const files: string[] = [];
-  for (const entry of entries) {
-    const src = path.join(config.stateDir, entry.relPath);
-    const dest = path.join(payload, entry.relPath);
-    await fs.copy(src, dest, { overwrite: true, errorOnExist: false });
-    files.push(entry.relPath);
+  for (const item of selectedItems) {
+    const relPath = toFsPath(item.relPath);
+    const src = path.join(config.stateDir, relPath);
+    const dest = path.join(payload, relPath);
+    await fs.ensureDir(path.dirname(dest));
+    await fs.copyFile(src, dest);
+    files.push(item.relPath);
   }
 
   if (!config.sanitize) {
@@ -49,7 +157,8 @@ export async function previewPackState(config: SyncConfig): Promise<PreviewResul
 }
 
 export async function packState(config: SyncConfig, outDir?: string): Promise<{ archivePath: string; manifest: Manifest }> {
-  const entries = await resolveExistingPaths(config);
+  const scanned = await collectScannedFiles(config);
+  const { selectedItems } = summarizePackScan(scanned, config.ignorePaths, 0);
   const tempRoot = outDir ? path.resolve(outDir) : await fs.mkdtemp(path.join(os.tmpdir(), "clawsync-"));
   await fs.ensureDir(tempRoot);
   const staging = path.join(tempRoot, "staging");
@@ -57,11 +166,13 @@ export async function packState(config: SyncConfig, outDir?: string): Promise<{ 
   await fs.ensureDir(payload);
 
   const files: string[] = [];
-  for (const entry of entries) {
-    const src = path.join(config.stateDir, entry.relPath);
-    const dest = path.join(payload, entry.relPath);
-    await fs.copy(src, dest, { overwrite: true, errorOnExist: false });
-    files.push(entry.relPath);
+  for (const item of selectedItems) {
+    const relPath = toFsPath(item.relPath);
+    const src = path.join(config.stateDir, relPath);
+    const dest = path.join(payload, relPath);
+    await fs.ensureDir(path.dirname(dest));
+    await fs.copyFile(src, dest);
+    files.push(item.relPath);
   }
 
   let envMap: Record<string, string> = {};
@@ -79,6 +190,7 @@ export async function packState(config: SyncConfig, outDir?: string): Promise<{ 
     stateDir: config.stateDir,
     include: config.include,
     exclude: config.exclude,
+    ignorePaths: config.ignorePaths.length > 0 ? [...config.ignorePaths] : undefined,
     files: files.sort(),
     sanitized,
     envVars: Object.keys(envMap).sort(),
