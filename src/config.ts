@@ -8,12 +8,15 @@ const ALL_COMPONENTS: SyncComponent[] = [
   "workspace",
   "credentials",
   "sessions",
+  "devices",
+  "identity",
+  "channels",
   "tools",
   "media",
 ];
 
 const DEFAULT_INCLUDE: SyncComponent[] = ["config", "workspace"];
-const DEFAULT_EXCLUDE: SyncComponent[] = ["credentials", "sessions", "tools", "media"];
+const DEFAULT_EXCLUDE: SyncComponent[] = ["credentials", "sessions", "devices", "identity", "channels", "tools", "media"];
 
 interface FileConfig {
   include?: SyncComponent[];

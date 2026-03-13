@@ -4,8 +4,10 @@ import os from "node:os";
 import path from "node:path";
 import fs from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import http from "node:http";
 import { promisify } from "node:util";
+import { once } from "node:events";
 
 const execFileAsync = promisify(execFile);
 const ROOT = process.cwd();
@@ -63,6 +65,50 @@ async function runCli(args, extraEnv = {}) {
   }
 }
 
+async function getFreePort() {
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200);
+    res.end("ok");
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => resolve());
+  });
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+  await new Promise((resolve) => server.close(() => resolve()));
+  return port;
+}
+
+async function httpGet(url) {
+  return new Promise((resolve, reject) => {
+    const req = http.get(url, (res) => {
+      const chunks = [];
+      res.on("data", (chunk) => chunks.push(chunk));
+      res.on("end", () => {
+        resolve({
+          status: res.statusCode ?? 0,
+          body: Buffer.concat(chunks).toString("utf8"),
+        });
+      });
+    });
+    req.on("error", reject);
+  });
+}
+
+async function waitForHealth(port, maxAttempts = 20) {
+  for (let i = 0; i < maxAttempts; i += 1) {
+    try {
+      const response = await httpGet(`http://127.0.0.1:${port}/health`);
+      if (response.status === 200) return;
+    } catch {
+      // ignore and retry
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error("serve health check timeout");
+}
+
 function matchLineValue(output, prefix) {
   const line = output
     .split(/\r?\n/)
@@ -113,11 +159,11 @@ test("scope shows default selected components", async () => {
 test("version command supports -v and verbose output", async () => {
   const shortVersion = await runCli(["--version"]);
   assert.equal(shortVersion.code, 0, shortVersion.stderr);
-  assert.match(shortVersion.stdout, /0\.1\.1/);
+  assert.match(shortVersion.stdout, /0\.1\.7/);
 
   const verboseVersion = await runCli(["version", "-v"]);
   assert.equal(verboseVersion.code, 0, verboseVersion.stderr);
-  assert.match(verboseVersion.stdout, /clawsync 0\.1\.1/);
+  assert.match(verboseVersion.stdout, /clawsync 0\.1\.7/);
   assert.match(verboseVersion.stdout, /node:\s+v\d+\.\d+\.\d+/);
   assert.match(verboseVersion.stdout, /platform:\s+\w+\/\w+/);
 });
@@ -139,9 +185,11 @@ test("pack/unpack sanitizes secrets and generates env scripts", async () => {
   const archivePath = matchLineValue(packResult.stdout, "- Archive:");
   assert.ok(archivePath, "archive path should exist in output");
 
-  const unpackResult = await runCli(["unpack", "--from", archivePath, "--state-dir", restoreDir]);
+  const unpackResult = await runCli(["unpack", "--from", archivePath, "--state-dir", restoreDir, "--yes"]);
   assert.equal(unpackResult.code, 0, unpackResult.stderr);
-  assert.match(unpackResult.stdout, /env scripts:/);
+  assert.match(unpackResult.stdout, /env vars missing in current shell/);
+  assert.match(unpackResult.stdout, /source ".*env-export\.sh"/);
+  assert.doesNotMatch(unpackResult.stdout, /post-restore verification/);
 
   const restoredConfig = await fs.readFile(path.join(restoreDir, "openclaw.json"), "utf8");
   const restoredEnv = await fs.readFile(path.join(restoreDir, ".env"), "utf8");
@@ -174,7 +222,7 @@ test("pack supports ignore-paths and excludes ignored files", async () => {
   assert.ok(archivePath, "archive path should exist in output");
   assert.doesNotMatch(packResult.stdout, /- workspace\/config\/settings\.json/);
 
-  const unpackResult = await runCli(["unpack", "--from", archivePath, "--state-dir", restoreDir]);
+  const unpackResult = await runCli(["unpack", "--from", archivePath, "--state-dir", restoreDir, "--yes"]);
   assert.equal(unpackResult.code, 0, unpackResult.stderr);
   assert.equal(existsSync(path.join(restoreDir, "workspace", "config", "settings.json")), false);
 });
@@ -200,7 +248,7 @@ test("pack supports workspace include globs for non-config files", async () => {
   const archivePath = matchLineValue(packResult.stdout, "- Archive:");
   assert.ok(archivePath, "archive path should exist in output");
 
-  const unpackResult = await runCli(["unpack", "--from", archivePath, "--state-dir", restoreDir]);
+  const unpackResult = await runCli(["unpack", "--from", archivePath, "--state-dir", restoreDir, "--yes"]);
   assert.equal(unpackResult.code, 0, unpackResult.stderr);
   assert.equal(existsSync(path.join(restoreDir, "workspace", "project", "notes.txt")), true);
 });
@@ -225,6 +273,7 @@ test("pull with --strategy merge keeps local conflicts and prints conflict detai
     localStateDir,
     "--strategy",
     "merge",
+    "--yes",
   ]);
   assert.equal(mergeResult.code, 0, mergeResult.stderr);
   assert.match(mergeResult.stdout, /## Merge Report/);
@@ -250,6 +299,7 @@ test("merge command performs local-first merge and reports conflicts", async () 
     remoteBare,
     "--state-dir",
     localStateDir,
+    "--yes",
   ]);
   assert.equal(mergeResult.code, 0, mergeResult.stderr);
   assert.match(mergeResult.stdout, /merged to:/);
@@ -289,9 +339,135 @@ test("merge does not report conflicts for identical local files", async () => {
     localStateDir,
     "--strategy",
     "merge",
+    "--yes",
   ]);
   assert.equal(mergeResult.code, 0, mergeResult.stderr);
   assert.match(mergeResult.stdout, /- Conflicts:\s+0/);
+});
+
+test("profile full-migrate packs channels/devices/identity locally", async () => {
+  const stateDir = await mkTmpDir("profile-full-migrate");
+  const outDir = await mkTmpDir("profile-full-migrate-out");
+  const restoreDir = await mkTmpDir("profile-full-migrate-restore");
+  await writeStateFixture(stateDir);
+  await fs.mkdir(path.join(stateDir, "devices"), { recursive: true });
+  await fs.mkdir(path.join(stateDir, "identity"), { recursive: true });
+  await fs.mkdir(path.join(stateDir, "telegram"), { recursive: true });
+  await fs.writeFile(path.join(stateDir, "devices", "paired.json"), '{"node":"ok"}', "utf8");
+  await fs.writeFile(path.join(stateDir, "identity", "device.json"), '{"id":"abc"}', "utf8");
+  await fs.writeFile(path.join(stateDir, "telegram", "offset.json"), '{"offset":1}', "utf8");
+  await fs.mkdir(path.join(stateDir, "agents", "main", "sessions"), { recursive: true });
+  await fs.writeFile(
+    path.join(stateDir, "agents", "main", "sessions", "04c43f73-0312-4c8f-bb55-af2e814b6873.jsonl.deleted.2026-02-27T00-21-06.085Z"),
+    "session tombstone",
+    "utf8",
+  );
+
+  const profileResult = await runCli([
+    "profile",
+    "full-migrate",
+    "--state-dir",
+    stateDir,
+    "--out",
+    outDir,
+  ]);
+  assert.equal(profileResult.code, 0, profileResult.stderr);
+  assert.match(profileResult.stdout, /profile: full-migrate/);
+  assert.match(profileResult.stdout, /target: local archive only \(no git push\)/);
+  assert.match(profileResult.stdout, /- agents\/main\/sessions/);
+  assert.doesNotMatch(
+    profileResult.stdout,
+    /agents\/main\/sessions\/04c43f73-0312-4c8f-bb55-af2e814b6873\.jsonl\.deleted\.2026-02-27T00-21-06\.085Z/,
+  );
+  const archivePath = matchLineValue(profileResult.stdout, "- Archive:");
+  assert.ok(archivePath, "archive path should exist in output");
+
+  const unpackResult = await runCli(["unpack", "--from", archivePath, "--state-dir", restoreDir, "--yes"]);
+  assert.equal(unpackResult.code, 0, unpackResult.stderr);
+  assert.equal(existsSync(path.join(restoreDir, "devices", "paired.json")), true);
+  assert.equal(existsSync(path.join(restoreDir, "identity", "device.json")), true);
+  assert.equal(existsSync(path.join(restoreDir, "telegram", "offset.json")), true);
+});
+
+test("unpack preserves local gateway token by default", async () => {
+  const sourceStateDir = await mkTmpDir("token-source");
+  const targetStateDir = await mkTmpDir("token-target");
+  const outDir = await mkTmpDir("token-out");
+  await writeStateFixture(sourceStateDir);
+  await fs.writeFile(
+    path.join(sourceStateDir, "openclaw.json"),
+    JSON.stringify({ gateway: { auth: { token: "backup-token-123" } } }, null, 2),
+    "utf8",
+  );
+  await fs.writeFile(
+    path.join(targetStateDir, "openclaw.json"),
+    JSON.stringify({ gateway: { auth: { token: "local-token-999" } } }, null, 2),
+    "utf8",
+  );
+
+  const packResult = await runCli([
+    "profile",
+    "full-migrate",
+    "--state-dir",
+    sourceStateDir,
+    "--out",
+    outDir,
+  ]);
+  assert.equal(packResult.code, 0, packResult.stderr);
+  const archivePath = matchLineValue(packResult.stdout, "- Archive:");
+  assert.ok(archivePath, "archive path should exist in output");
+
+  const restoreResult = await runCli([
+    "unpack",
+    "--from",
+    archivePath,
+    "--state-dir",
+    targetStateDir,
+    "--yes",
+  ]);
+  assert.equal(restoreResult.code, 0, restoreResult.stderr);
+  assert.match(restoreResult.stdout, /gateway token: preserved from local machine/);
+
+  const restoredConfigRaw = await fs.readFile(path.join(targetStateDir, "openclaw.json"), "utf8");
+  const restoredConfig = JSON.parse(restoredConfigRaw);
+  assert.equal(restoredConfig.gateway?.auth?.token, "local-token-999");
+});
+
+test("serve supports token auth for archive list and download", async () => {
+  const archiveDir = await mkTmpDir("serve-archives");
+  const port = await getFreePort();
+  const token = "serve-test-token";
+  const archiveName = "sample-archive.tar.gz";
+  const archivePath = path.join(archiveDir, archiveName);
+  await fs.writeFile(archivePath, "dummy-archive-content", "utf8");
+
+  const serverProc = spawn(
+    process.execPath,
+    [CLI_PATH, "serve", "--token", token, "--port", String(port), "--dir", archiveDir],
+    { cwd: ROOT, env: { ...process.env } },
+  );
+  try {
+    await waitForHealth(port);
+
+    const unauthorizedList = await httpGet(`http://127.0.0.1:${port}/archives`);
+    assert.equal(unauthorizedList.status, 401);
+
+    const listResponse = await httpGet(`http://127.0.0.1:${port}/archives?token=${token}`);
+    assert.equal(listResponse.status, 200);
+    assert.match(listResponse.body, /sample-archive\.tar\.gz/);
+
+    const downloadResponse = await httpGet(
+      `http://127.0.0.1:${port}/download/${encodeURIComponent(archiveName)}?token=${token}`,
+    );
+    assert.equal(downloadResponse.status, 200);
+    assert.equal(downloadResponse.body, "dummy-archive-content");
+  } finally {
+    serverProc.kill("SIGTERM");
+    await Promise.race([
+      once(serverProc, "exit"),
+      new Promise((resolve) => setTimeout(resolve, 2000)),
+    ]);
+  }
 });
 
 test("push/pull with git backend and local bare remote", async () => {
@@ -336,6 +512,7 @@ test("push/pull with git backend and local bare remote", async () => {
     "main",
     "--state-dir",
     restoreDir,
+    "--yes",
   ]);
   assert.equal(pullResult.code, 0, pullResult.stderr);
   assert.ok(existsSync(path.join(restoreDir, "openclaw.json")));

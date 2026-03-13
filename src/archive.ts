@@ -339,13 +339,44 @@ export async function packState(config: SyncConfig, outDir?: string): Promise<{ 
   return { archivePath, manifest };
 }
 
+export async function readArchiveManifest(archivePath: string): Promise<Manifest> {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "clawsync-manifest-"));
+  try {
+    await tar.extract({
+      file: archivePath,
+      cwd: tempRoot,
+      gzip: true,
+      filter: (entryPath) => entryPath === "manifest.json",
+    });
+    const manifestPath = path.join(tempRoot, "manifest.json");
+    return await fs.readJson(manifestPath) as Manifest;
+  } finally {
+    await fs.remove(tempRoot);
+  }
+}
+
+async function readGatewayTokenFromOpenClawConfig(filePath: string): Promise<string> {
+  try {
+    const config = await fs.readJson(filePath) as { gateway?: { auth?: { token?: unknown } } };
+    const value = config.gateway?.auth?.token;
+    return typeof value === "string" ? value : "";
+  } catch {
+    return "";
+  }
+}
+
 export async function unpackState(
   archivePath: string,
   targetStateDir: string,
   strategy: UnpackStrategy,
   envScriptDir?: string,
+  options?: { preserveGatewayToken?: boolean },
 ): Promise<UnpackResult> {
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "clawsync-unpack-"));
+  const preserveGatewayToken = options?.preserveGatewayToken ?? true;
+  const currentGatewayToken = preserveGatewayToken
+    ? await readGatewayTokenFromOpenClawConfig(path.join(targetStateDir, "openclaw.json"))
+    : "";
   await tar.extract({ file: archivePath, cwd: tempRoot, gzip: true });
 
   const manifestPath = path.join(tempRoot, "manifest.json");
@@ -370,7 +401,7 @@ export async function unpackState(
     const dest = path.join(targetStateDir, relPath);
     const destExists = await fs.pathExists(dest);
 
-    if (strategy === "skip") {
+      if (strategy === "skip") {
       if (destExists) continue;
       await fs.copy(src, dest, { overwrite: false, errorOnExist: false });
       continue;
@@ -439,6 +470,22 @@ export async function unpackState(
       ];
     }
   }
+
+  if (preserveGatewayToken && currentGatewayToken) {
+    try {
+      const restoredConfigPath = path.join(targetStateDir, "openclaw.json");
+      if (await fs.pathExists(restoredConfigPath)) {
+        const restored = await fs.readJson(restoredConfigPath) as { gateway?: { auth?: { token?: string } } };
+        if (!restored.gateway) restored.gateway = {};
+        if (!restored.gateway.auth) restored.gateway.auth = {};
+        restored.gateway.auth.token = currentGatewayToken;
+        await fs.writeJson(restoredConfigPath, restored, { spaces: 2 });
+      }
+    } catch {
+      // Keep restore best-effort even if openclaw.json is invalid.
+    }
+  }
+
   let mergeReport: MergeReport | undefined;
   if (strategy === "merge") {
     mergeReport = {

@@ -7,6 +7,9 @@ const COMPONENT_PATHS: Record<SyncComponent, string[]> = {
   workspace: ["workspace"],
   credentials: ["credentials"],
   sessions: ["sessions", "agents"],
+  devices: ["devices"],
+  identity: ["identity"],
+  channels: ["telegram", "whatsapp", "signal", "discord"],
   tools: ["tools"],
   media: ["media"],
 };

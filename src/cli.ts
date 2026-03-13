@@ -2,11 +2,14 @@
 import os from "node:os";
 import path from "node:path";
 import fs from "fs-extra";
+import * as tar from "tar";
 import * as readline from "node:readline/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { Command } from "commander";
 import { buildSyncConfig, listComponents, resolveStateDir } from "./config.js";
 import { resolveEntries } from "./scope.js";
-import { packState, previewPackState, scanPackState, unpackState } from "./archive.js";
+import { packState, previewPackState, readArchiveManifest, scanPackState, unpackState } from "./archive.js";
 import {
   canPushToGit,
   getDefaultGitPushBranch,
@@ -23,9 +26,13 @@ import {
   parseInterval,
   removeCronJob,
 } from "./scheduler/cron.js";
+import { runArchiveServer } from "./server.js";
 import type { Manifest, MergeReport, UnpackStrategy } from "./types.js";
 
 const program = new Command();
+const execFileAsync = promisify(execFile);
+const DISPLAY_MAX_DEPTH = 3;
+const DISPLAY_MAX_ITEMS = 10;
 
 function commonOptions(cmd: Command): Command {
   return cmd
@@ -52,6 +59,125 @@ function parseYesNoOption(raw: string | undefined, optionName: string): boolean 
   if (normalized === "yes") return true;
   if (normalized === "no") return false;
   throw new Error(`Invalid value for ${optionName}: ${raw}. Allowed values: yes, no`);
+}
+
+const FULL_MIGRATE_COMPONENTS = [
+  "config",
+  "workspace",
+  "credentials",
+  "sessions",
+  "devices",
+  "identity",
+  "channels",
+] as const;
+
+const HIGH_RISK_RESTORE_PREFIXES = [
+  "credentials/",
+  "agents/",
+  "sessions/",
+  "telegram/",
+  "whatsapp/",
+  "signal/",
+  "discord/",
+  "devices/",
+  "identity/",
+];
+
+function detectHighRiskRestorePaths(manifest: Manifest): string[] {
+  return manifest.files.filter((file) => {
+    if (file === "openclaw.json" || file === ".env") return true;
+    return HIGH_RISK_RESTORE_PREFIXES.some((prefix) => file.startsWith(prefix));
+  });
+}
+
+function toDisplayPath(input: string, maxDepth = DISPLAY_MAX_DEPTH): string {
+  const segments = input.split("/").filter(Boolean);
+  if (segments.length <= maxDepth) return input;
+  return segments.slice(0, maxDepth).join("/");
+}
+
+function printCappedPathList(items: string[], options?: { maxItems?: number; maxDepth?: number; dedupe?: boolean }): void {
+  const maxItems = options?.maxItems ?? DISPLAY_MAX_ITEMS;
+  const maxDepth = options?.maxDepth ?? DISPLAY_MAX_DEPTH;
+  const transformed = items.map((item) => toDisplayPath(item, maxDepth));
+  const normalized = options?.dedupe === false ? transformed : Array.from(new Set(transformed));
+  const displayed = normalized.slice(0, maxItems);
+  for (const item of displayed) {
+    console.log(`- ${item}`);
+  }
+  if (normalized.length > maxItems) {
+    console.log(`- ... ${normalized.length - maxItems} more`);
+  }
+}
+
+function printRestoreDryRunSummary(targetStateDir: string, strategy: UnpackStrategy, manifest: Manifest): void {
+  const riskyFiles = detectHighRiskRestorePaths(manifest);
+  console.log("dry-run mode");
+  console.log(`target: ${targetStateDir}`);
+  console.log(`strategy: ${strategy}`);
+  console.log(`files in archive: ${manifest.files.length}`);
+  console.log(`sanitized: ${manifest.sanitized ? "yes" : "no"}`);
+  if (riskyFiles.length > 0) {
+    console.log(`high-risk files: ${riskyFiles.length}`);
+    console.log("sample high-risk paths:");
+    for (const file of riskyFiles.slice(0, 8)) {
+      console.log(`- ${toDisplayPath(file)}`);
+    }
+    if (riskyFiles.length > 8) {
+      console.log(`- ... ${riskyFiles.length - 8} more`);
+    }
+  } else {
+    console.log("high-risk files: 0");
+  }
+  console.log("no files were changed.");
+}
+
+async function createPreRestoreSnapshot(stateDir: string): Promise<string | null> {
+  if (!(await fs.pathExists(stateDir))) return null;
+  const stat = await fs.stat(stateDir);
+  if (!stat.isDirectory()) return null;
+  const parent = path.dirname(stateDir);
+  const base = path.basename(stateDir);
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const snapshotPath = path.join(os.tmpdir(), `clawsync-pre-restore-${stamp}.tar.gz`);
+  await tar.create(
+    {
+      gzip: true,
+      cwd: parent,
+      file: snapshotPath,
+    },
+    [base],
+  );
+  return snapshotPath;
+}
+
+async function confirmHighRiskRestoreIfNeeded(opts: {
+  manifest: Manifest;
+  dryRun?: boolean;
+  yes?: boolean;
+  commandLabel: string;
+}): Promise<void> {
+  if (opts.dryRun) return;
+  const riskyFiles = detectHighRiskRestorePaths(opts.manifest);
+  if (riskyFiles.length === 0) return;
+  if (opts.yes) return;
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new Error(
+      `High-risk restore detected (${riskyFiles.length} sensitive files). Run "${opts.commandLabel} --dry-run" first, then re-run with --yes to apply.`,
+    );
+  }
+  console.log("WARNING: this restore includes credentials/sessions/channel state.");
+  console.log(`high-risk files: ${riskyFiles.length}`);
+  console.log("tip: run with --dry-run first to preview changes.");
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = await rl.question("Type 'yes' to continue restore: ");
+    if (answer.trim() !== "yes") {
+      throw new Error("Restore cancelled.");
+    }
+  } finally {
+    rl.close();
+  }
 }
 
 async function ensureGitPushTargetReady(repoDir?: string): Promise<void> {
@@ -173,28 +299,55 @@ function printPackReport(archivePath: string, manifest: Manifest): void {
   console.log(`- Total files: ${manifest.files.length}`);
   console.log(`- Sanitized: ${manifest.sanitized ? "yes" : "no"}`);
   console.log(`- Env vars captured: ${manifest.envVars.length}`);
-  console.log("### File Details");
-  for (const item of manifest.files) {
-    console.log(`- ${item}`);
-  }
+  console.log("### File Details (top 3 levels, max 10)");
+  printCappedPathList(manifest.files);
 }
 
-function printEnvRecoveryGuidance(manifest: Manifest, stateDir: string): void {
-  if (!manifest.sanitized) return;
-  console.log("env vars to restore:");
-  if (manifest.envVars.length === 0) {
-    console.log("- none");
-  } else {
-    for (const key of manifest.envVars) {
-      console.log(`- ${key}`);
-    }
+function printEnvRecoveryGuidance(manifest: Manifest, stateDir: string): { missingEnvVars: string[] } {
+  if (!manifest.sanitized) return { missingEnvVars: [] };
+  if (manifest.envVars.length === 0) return { missingEnvVars: [] };
+  const missingEnvVars = manifest.envVars.filter((key) => !process.env[key]);
+  if (missingEnvVars.length === 0) {
+    console.log("env vars: already present in current shell.");
+    return { missingEnvVars };
   }
-  if (!manifest.envScriptRelativePaths?.length) return;
+  console.log("env vars missing in current shell:");
+  missingEnvVars.forEach((key) => console.log(`- ${key}`));
+  if (!manifest.envScriptRelativePaths?.length) {
+    console.log("WARNING: env export script not found; restore secrets manually.");
+    return { missingEnvVars };
+  }
   const shPath = manifest.envScriptRelativePaths.find((rel) => rel.endsWith("env-export.sh"));
-  if (!shPath) return;
+  if (!shPath) {
+    console.log("WARNING: env-export.sh not found; restore secrets manually.");
+    return { missingEnvVars };
+  }
   const absShPath = path.join(stateDir, shPath);
-  console.log("how to apply:");
+  console.log("IMPORTANT: environment variables are not auto-loaded.");
+  console.log("Run the export script before verification:");
   console.log(`- bash/zsh: source "${absShPath}"`);
+  return { missingEnvVars };
+}
+
+async function printPostRestoreHealthChecklist(): Promise<void> {
+  console.log("post-restore verification:");
+  try {
+    const { stdout, stderr } = await execFileAsync("openclaw", ["gateway", "status"], { timeout: 10_000 });
+    const output = (stdout || stderr || "").trim();
+    if (output) {
+      console.log("gateway status:");
+      output.split(/\r?\n/).slice(0, 8).forEach((line) => {
+        console.log(`- ${line}`);
+      });
+    } else {
+      console.log("- gateway status: command returned empty output");
+    }
+  } catch (error) {
+    const message = (error as Error).message || "unable to run `openclaw gateway status`";
+    console.log(`- gateway status: check failed (${message})`);
+  }
+  console.log("- channel reconnect: verify channels can receive/send messages");
+  console.log("- telegram: if silent, send /start to the bot");
 }
 
 function formatBytes(bytes: number): string {
@@ -231,7 +384,7 @@ function printScanSummary(report: Awaited<ReturnType<typeof scanPackState>>): vo
   if (report.largestItems.length > 0) {
     console.log("### Largest Items");
     report.largestItems.forEach((item, idx) => {
-      console.log(`${idx + 1}. ${item.relPath} (${formatBytes(item.sizeBytes)}) [${item.component}]`);
+      console.log(`${idx + 1}. ${toDisplayPath(item.relPath)} (${formatBytes(item.sizeBytes)}) [${item.component}]`);
     });
   }
 }
@@ -277,14 +430,14 @@ async function chooseLargestItemsToIgnore(
 program
   .name("clawsync")
   .description("Sync OpenClaw config/state with Git backend")
-  .version("0.1.1", "--version", "output the current version");
+  .version("0.1.7", "--version", "output the current version");
 
 program
   .command("version")
   .description("Show version information")
   .option("-v, --verbose", "show runtime details")
   .action((opts) => {
-    console.log("clawsync 0.1.1");
+    console.log("clawsync 0.1.7");
     if (!opts.verbose) return;
     console.log(`node: ${process.version}`);
     console.log(`platform: ${process.platform}/${process.arch}`);
@@ -308,6 +461,68 @@ gitProgram
     console.log(`repo: ${result.repoDir}`);
     console.log(`origin: ${result.originUrl}`);
     console.log(`branch: ${result.branch}`);
+  });
+
+const profileProgram = program.command("profile").description("Run predefined backup profiles");
+
+profileProgram
+  .command("full-migrate")
+  .description("Create a local full migration archive (does not push to git)")
+  .option("--state-dir <path>", "OpenClaw state dir; default ~/.openclaw or OPENCLAW_STATE_DIR")
+  .option("--config <path>", "sync config file path")
+  .option("--out <dir>", "output directory for archive; default <state-dir>/migrations")
+  .option("--dry-run", "preview selected files without writing archive")
+  .option("--sanitize", "sanitize secrets in archive (disabled by default for migration)")
+  .action(async (opts) => {
+    const stateDir = resolveStateDir(opts.stateDir);
+    const cfg = await buildSyncConfig({
+      stateDir: opts.stateDir,
+      config: opts.config,
+      sanitize: opts.sanitize ? true : false,
+    });
+    const runCfg = {
+      ...cfg,
+      include: [...FULL_MIGRATE_COMPONENTS],
+      exclude: [],
+      sanitize: opts.sanitize ? true : false,
+    };
+    if (opts.dryRun) {
+      const preview = await previewPackState(runCfg);
+      console.log("dry-run mode");
+      console.log("profile: full-migrate");
+      console.log("target: local archive only (no git push)");
+      console.log(`stateDir: ${runCfg.stateDir}`);
+      console.log(`sanitize: ${runCfg.sanitize ? "on" : "off"}`);
+      console.log(`files: ${preview.files.length}`);
+      printCappedPathList(preview.files);
+      return;
+    }
+    const outputDir = opts.out ? path.resolve(opts.out) : path.join(stateDir, "migrations");
+    const result = await packState(runCfg, outputDir);
+    console.log("profile: full-migrate");
+    console.log("target: local archive only (no git push)");
+    printPackReport(result.archivePath, result.manifest);
+  });
+
+program
+  .command("serve")
+  .description("Serve local archives via HTTP with token authentication")
+  .requiredOption("--token <secret>", "access token for API requests")
+  .option("--port <port>", "server port", "7373")
+  .option("--dir <path>", "archive directory to serve")
+  .option("--state-dir <path>", "OpenClaw state dir; default ~/.openclaw or OPENCLAW_STATE_DIR")
+  .action(async (opts) => {
+    const stateDir = resolveStateDir(opts.stateDir);
+    const archiveDir = opts.dir ? path.resolve(opts.dir) : path.join(stateDir, "migrations");
+    const parsedPort = Number(opts.port);
+    if (!Number.isInteger(parsedPort) || parsedPort <= 0 || parsedPort > 65535) {
+      throw new Error(`Invalid --port value: ${opts.port}`);
+    }
+    await runArchiveServer({
+      token: opts.token,
+      port: parsedPort,
+      archiveDir,
+    });
   });
 
 commonOptions(
@@ -337,7 +552,7 @@ commonOptions(
     topN: 8,
     onProgress: (item) => {
       if (item.action === "excluded-non-config") return;
-      console.log(`scan: ${item.relPath} (${formatBytes(item.sizeBytes)}) [${item.action}]`);
+      console.log(`scan: ${toDisplayPath(item.relPath)} (${formatBytes(item.sizeBytes)}) [${item.action}]`);
     },
   });
   printScanSummary(scanReport);
@@ -358,7 +573,7 @@ commonOptions(
     console.log(`stateDir: ${runCfg.stateDir}`);
     console.log(`sanitize: ${runCfg.sanitize ? "on" : "off"}`);
     console.log(`files: ${preview.files.length}`);
-    for (const file of preview.files) console.log(`- ${file}`);
+    printCappedPathList(preview.files);
     console.log(`sanitized: ${preview.sanitized ? "yes" : "no"}`);
     if (preview.envVars.length > 0) {
       console.log("env vars:");
@@ -377,19 +592,48 @@ program
   .option("--state-dir <path>", "target state dir")
   .option("--strategy <mode>", "overwrite|skip|merge", "overwrite")
   .option("--env-script-dir <path>", "directory to write env-export scripts")
+  .option("--dry-run", "preview restore plan without writing files")
+  .option("--yes", "apply high-risk restore without interactive confirmation")
+  .option("--no-pre-snapshot", "disable pre-restore local snapshot")
+  .option("--overwrite-gateway-token", "use token from backup openclaw.json")
   .action(async (opts) => {
     const stateDir = resolveStateDir(opts.stateDir);
-    await fs.ensureDir(stateDir);
     const strategy = opts.strategy as UnpackStrategy;
-    const { manifest, mergeReport } = await unpackState(path.resolve(opts.from), stateDir, strategy, opts.envScriptDir);
-    console.log(`restored to: ${stateDir}`);
-    console.log(`files: ${manifest.files.length}`);
-    if (manifest.envScriptRelativePaths?.length) {
-      console.log("env scripts:");
-      for (const rel of manifest.envScriptRelativePaths) console.log(`- ${rel}`);
+    const archivePath = path.resolve(opts.from);
+    const manifest = await readArchiveManifest(archivePath);
+    if (opts.dryRun) {
+      printRestoreDryRunSummary(stateDir, strategy, manifest);
+      return;
     }
-    printEnvRecoveryGuidance(manifest, stateDir);
+    await confirmHighRiskRestoreIfNeeded({
+      manifest,
+      dryRun: opts.dryRun,
+      yes: opts.yes,
+      commandLabel: "clawsync unpack --from <archive-path>",
+    });
+    await fs.ensureDir(stateDir);
+    let snapshotPath: string | null = null;
+    if (opts.preSnapshot !== false) {
+      snapshotPath = await createPreRestoreSnapshot(stateDir);
+    }
+    const { manifest: restoredManifest, mergeReport } = await unpackState(archivePath, stateDir, strategy, opts.envScriptDir, {
+      preserveGatewayToken: !opts.overwriteGatewayToken,
+    });
+    console.log(`restored to: ${stateDir}`);
+    console.log(`files: ${restoredManifest.files.length}`);
+    if (snapshotPath) {
+      console.log(`pre-restore snapshot: ${snapshotPath}`);
+    }
+    if (opts.overwriteGatewayToken) {
+      console.log("gateway token: restored from backup");
+    } else {
+      console.log("gateway token: preserved from local machine (default)");
+    }
+    const envStatus = printEnvRecoveryGuidance(restoredManifest, stateDir);
     printMergeReport(mergeReport);
+    if (envStatus.missingEnvVars.length === 0) {
+      await printPostRestoreHealthChecklist();
+    }
   });
 
 commonOptions(
@@ -410,7 +654,7 @@ commonOptions(
     console.log(`stateDir: ${cfg.stateDir}`);
     console.log(`sanitize: ${cfg.sanitize ? "on" : "off"}`);
     console.log(`files: ${preview.files.length}`);
-    for (const file of preview.files) console.log(`- ${file}`);
+    printCappedPathList(preview.files);
     console.log(`sanitized: ${preview.sanitized ? "yes" : "no"}`);
     if (preview.envVars.length > 0) {
       console.log("env vars:");
@@ -507,21 +751,53 @@ program
   .option("--state-dir <path>", "target state dir")
   .option("--strategy <mode>", "overwrite|skip|merge", "overwrite")
   .option("--env-script-dir <path>", "directory to write env-export scripts")
+  .option("--dry-run", "preview restore plan without writing files")
+  .option("--yes", "apply high-risk restore without interactive confirmation")
+  .option("--no-pre-snapshot", "disable pre-restore local snapshot")
+  .option("--overwrite-gateway-token", "use token from backup openclaw.json")
   .action(async (opts) => {
     const targetStateDir = resolveStateDir(opts.stateDir);
-    await fs.ensureDir(targetStateDir);
     const tempOut = await fs.mkdtemp(path.join(os.tmpdir(), "clawsync-download-"));
     const archivePath = await resolveArchiveFromSource(opts, tempOut);
     const strategy = opts.strategy as UnpackStrategy;
-    const { manifest, mergeReport } = await unpackState(archivePath, targetStateDir, strategy, opts.envScriptDir);
-    console.log(`pulled and restored to: ${targetStateDir}`);
-    console.log(`files: ${manifest.files.length}`);
-    if (manifest.envScriptRelativePaths?.length) {
-      console.log("env scripts:");
-      for (const rel of manifest.envScriptRelativePaths) console.log(`- ${rel}`);
+    const manifest = await readArchiveManifest(archivePath);
+    if (opts.dryRun) {
+      printRestoreDryRunSummary(targetStateDir, strategy, manifest);
+      return;
     }
-    printEnvRecoveryGuidance(manifest, targetStateDir);
+    await confirmHighRiskRestoreIfNeeded({
+      manifest,
+      dryRun: opts.dryRun,
+      yes: opts.yes,
+      commandLabel: "clawsync pull --repo-url <url>",
+    });
+    await fs.ensureDir(targetStateDir);
+    let snapshotPath: string | null = null;
+    if (opts.preSnapshot !== false) {
+      snapshotPath = await createPreRestoreSnapshot(targetStateDir);
+    }
+    const { manifest: restoredManifest, mergeReport } = await unpackState(
+      archivePath,
+      targetStateDir,
+      strategy,
+      opts.envScriptDir,
+      { preserveGatewayToken: !opts.overwriteGatewayToken },
+    );
+    console.log(`pulled and restored to: ${targetStateDir}`);
+    console.log(`files: ${restoredManifest.files.length}`);
+    if (snapshotPath) {
+      console.log(`pre-restore snapshot: ${snapshotPath}`);
+    }
+    if (opts.overwriteGatewayToken) {
+      console.log("gateway token: restored from backup");
+    } else {
+      console.log("gateway token: preserved from local machine (default)");
+    }
+    const envStatus = printEnvRecoveryGuidance(restoredManifest, targetStateDir);
     printMergeReport(mergeReport);
+    if (envStatus.missingEnvVars.length === 0) {
+      await printPostRestoreHealthChecklist();
+    }
   });
 
 program
@@ -532,20 +808,52 @@ program
   .option("--branch <name>", "git branch", "main")
   .option("--state-dir <path>", "target state dir")
   .option("--env-script-dir <path>", "directory to write env-export scripts")
+  .option("--dry-run", "preview restore plan without writing files")
+  .option("--yes", "apply high-risk restore without interactive confirmation")
+  .option("--no-pre-snapshot", "disable pre-restore local snapshot")
+  .option("--overwrite-gateway-token", "use token from backup openclaw.json")
   .action(async (opts) => {
     const targetStateDir = resolveStateDir(opts.stateDir);
-    await fs.ensureDir(targetStateDir);
     const tempOut = await fs.mkdtemp(path.join(os.tmpdir(), "clawsync-download-"));
     const archivePath = await resolveArchiveFromSource(opts, tempOut);
-    const { manifest, mergeReport } = await unpackState(archivePath, targetStateDir, "merge", opts.envScriptDir);
-    console.log(`merged to: ${targetStateDir}`);
-    console.log(`files: ${manifest.files.length}`);
-    if (manifest.envScriptRelativePaths?.length) {
-      console.log("env scripts:");
-      for (const rel of manifest.envScriptRelativePaths) console.log(`- ${rel}`);
+    const manifest = await readArchiveManifest(archivePath);
+    if (opts.dryRun) {
+      printRestoreDryRunSummary(targetStateDir, "merge", manifest);
+      return;
     }
-    printEnvRecoveryGuidance(manifest, targetStateDir);
+    await confirmHighRiskRestoreIfNeeded({
+      manifest,
+      dryRun: opts.dryRun,
+      yes: opts.yes,
+      commandLabel: "clawsync merge --repo-url <url>",
+    });
+    await fs.ensureDir(targetStateDir);
+    let snapshotPath: string | null = null;
+    if (opts.preSnapshot !== false) {
+      snapshotPath = await createPreRestoreSnapshot(targetStateDir);
+    }
+    const { manifest: restoredManifest, mergeReport } = await unpackState(
+      archivePath,
+      targetStateDir,
+      "merge",
+      opts.envScriptDir,
+      { preserveGatewayToken: !opts.overwriteGatewayToken },
+    );
+    console.log(`merged to: ${targetStateDir}`);
+    console.log(`files: ${restoredManifest.files.length}`);
+    if (snapshotPath) {
+      console.log(`pre-restore snapshot: ${snapshotPath}`);
+    }
+    if (opts.overwriteGatewayToken) {
+      console.log("gateway token: restored from backup");
+    } else {
+      console.log("gateway token: preserved from local machine (default)");
+    }
+    const envStatus = printEnvRecoveryGuidance(restoredManifest, targetStateDir);
     printMergeReport(mergeReport);
+    if (envStatus.missingEnvVars.length === 0) {
+      await printPostRestoreHealthChecklist();
+    }
   });
 
 program.parseAsync().catch((err: unknown) => {

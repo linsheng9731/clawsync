@@ -3,6 +3,9 @@ export type SyncComponent =
   | "workspace"
   | "credentials"
   | "sessions"
+  | "devices"
+  | "identity"
+  | "channels"
   | "tools"
   | "media";
 
