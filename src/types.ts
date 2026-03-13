@@ -11,6 +11,7 @@ export interface SyncConfig {
   include: SyncComponent[];
   exclude: SyncComponent[];
   ignorePaths: string[];
+  workspaceIncludeGlobs: string[];
   strategy: UnpackStrategy;
   format: "tar";
   sanitize: boolean;
@@ -29,6 +30,7 @@ export interface Manifest {
   include: SyncComponent[];
   exclude: SyncComponent[];
   ignorePaths?: string[];
+  workspaceIncludeGlobs?: string[];
   files: string[];
   sanitized: boolean;
   envVars: string[];

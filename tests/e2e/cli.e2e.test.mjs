@@ -35,6 +35,7 @@ async function writeStateFixture(stateDir) {
     JSON.stringify({ password: "my-password", safe: "value" }, null, 2),
     "utf8",
   );
+  await fs.writeFile(path.join(stateDir, "workspace", "project", "notes.txt"), "workspace notes", "utf8");
 }
 
 function gitEnv() {
@@ -106,6 +107,8 @@ test("pack/unpack sanitizes secrets and generates env scripts", async () => {
   assert.match(packResult.stdout, /## Pack Report/);
   assert.match(packResult.stdout, /### File Details/);
   assert.match(packResult.stdout, /- workspace\/project\/config\.json/);
+  assert.match(packResult.stdout, /excluded-non-config/);
+  assert.doesNotMatch(packResult.stdout, /- workspace\/project\/notes\.txt/);
   const archivePath = matchLineValue(packResult.stdout, "- Archive:");
   assert.ok(archivePath, "archive path should exist in output");
 
@@ -121,6 +124,7 @@ test("pack/unpack sanitizes secrets and generates env scripts", async () => {
   assert.match(restoredEnv, /\$\{CLAWSYNC_OPENAI_API_KEY\}/);
   assert.match(envScript, /CLAWSYNC_AUTH_APIKEY/);
   assert.match(envScript, /sk-live-abc123/);
+  assert.equal(existsSync(path.join(restoreDir, "workspace", "project", "notes.txt")), false);
 });
 
 test("pack supports ignore-paths and excludes ignored files", async () => {
@@ -146,6 +150,32 @@ test("pack supports ignore-paths and excludes ignored files", async () => {
   const unpackResult = await runCli(["unpack", "--from", archivePath, "--state-dir", restoreDir]);
   assert.equal(unpackResult.code, 0, unpackResult.stderr);
   assert.equal(existsSync(path.join(restoreDir, "workspace", "project", "config.json")), false);
+});
+
+test("pack supports workspace include globs for non-config files", async () => {
+  const stateDir = await mkTmpDir("pack-workspace-rules");
+  const outDir = await mkTmpDir("pack-workspace-rules-out");
+  const restoreDir = await mkTmpDir("pack-workspace-rules-restore");
+  await writeStateFixture(stateDir);
+
+  const packResult = await runCli([
+    "pack",
+    "--state-dir",
+    stateDir,
+    "--out",
+    outDir,
+    "--workspace-include-globs",
+    "project/**/*.txt",
+  ]);
+  assert.equal(packResult.code, 0, packResult.stderr);
+  assert.match(packResult.stdout, /included-by-user-rule/);
+  assert.match(packResult.stdout, /- workspace\/project\/notes\.txt/);
+  const archivePath = matchLineValue(packResult.stdout, "- Archive:");
+  assert.ok(archivePath, "archive path should exist in output");
+
+  const unpackResult = await runCli(["unpack", "--from", archivePath, "--state-dir", restoreDir]);
+  assert.equal(unpackResult.code, 0, unpackResult.stderr);
+  assert.equal(existsSync(path.join(restoreDir, "workspace", "project", "notes.txt")), true);
 });
 
 test("push/pull with directory backend", async () => {
@@ -430,6 +460,8 @@ process.exit(2);
       backupDir,
       "--ignore-paths",
       "workspace/cache,media",
+      "--workspace-include-globs",
+      "project/**/*.txt",
     ],
     env,
   );
@@ -443,6 +475,8 @@ process.exit(2);
   const crontabContent = await fs.readFile(crontabFile, "utf8");
   assert.match(crontabContent, /--ignore-paths/);
   assert.match(crontabContent, /workspace\/cache,media/);
+  assert.match(crontabContent, /--workspace-include-globs/);
+  assert.match(crontabContent, /project\/\*\*\/\*\.txt/);
 
   const removeResult = await runCli(["schedule", "remove"], env);
   assert.equal(removeResult.code, 0, removeResult.stderr);

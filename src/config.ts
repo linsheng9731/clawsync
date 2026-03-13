@@ -19,6 +19,7 @@ interface FileConfig {
   include?: SyncComponent[];
   exclude?: SyncComponent[];
   ignorePaths?: string[];
+  workspaceIncludeGlobs?: string[];
   stateDir?: string;
   strategy?: UnpackStrategy;
   sanitize?: boolean;
@@ -72,12 +73,23 @@ function parseIgnorePaths(raw?: string): string[] | undefined {
   return Array.from(new Set(tokens));
 }
 
+function parseWorkspaceIncludeGlobs(raw?: string): string[] | undefined {
+  if (!raw) return undefined;
+  const tokens = raw
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((item) => item.replaceAll("\\", "/"));
+  return Array.from(new Set(tokens));
+}
+
 export async function buildSyncConfig(options: {
   stateDir?: string;
   config?: string;
   include?: string;
   exclude?: string;
   ignorePaths?: string;
+  workspaceIncludeGlobs?: string;
   strategy?: UnpackStrategy;
   sanitize?: boolean;
 }): Promise<SyncConfig> {
@@ -85,10 +97,12 @@ export async function buildSyncConfig(options: {
   const includeFromCli = parseComponents(options.include);
   const excludeFromCli = parseComponents(options.exclude);
   const ignorePathsFromCli = parseIgnorePaths(options.ignorePaths);
+  const workspaceIncludeGlobsFromCli = parseWorkspaceIncludeGlobs(options.workspaceIncludeGlobs);
 
   const include = includeFromCli ?? fileConfig.include ?? DEFAULT_INCLUDE;
   const exclude = excludeFromCli ?? fileConfig.exclude ?? DEFAULT_EXCLUDE;
   const ignorePaths = ignorePathsFromCli ?? fileConfig.ignorePaths ?? [];
+  const workspaceIncludeGlobs = workspaceIncludeGlobsFromCli ?? fileConfig.workspaceIncludeGlobs ?? [];
   const strategy = options.strategy ?? fileConfig.strategy ?? "overwrite";
   const sanitize = options.sanitize ?? fileConfig.sanitize ?? true;
 
@@ -97,6 +111,7 @@ export async function buildSyncConfig(options: {
     include,
     exclude,
     ignorePaths,
+    workspaceIncludeGlobs,
     strategy,
     format: "tar",
     sanitize,

@@ -70,6 +70,7 @@ clawsync <command> --help
 - `--include <list>`: comma-separated components to include
 - `--exclude <list>`: comma-separated components to exclude
 - `--ignore-paths <list>`: comma-separated relative paths to ignore (supports files or directories)
+- `--workspace-include-globs <list>`: wildcard rules to include non-config files/folders under `workspace/`
 - `--no-sanitize`: disable secret placeholder replacement
 
 ### `clawsync version`
@@ -97,6 +98,8 @@ Creates a `tar.gz` archive from selected state files.
 - `--dry-run`: preview selected files and sanitization result without writing archive
 - Before packing, CLI scans file sizes and prints scan progress/summary plus largest items.
 - In interactive terminal, you can choose largest items to ignore for current run.
+- By default, under `workspace/` only config-like files are included (`.json`, `.json5`, `.yaml`, `.yml`, `.toml`, `.env`).
+- Use `--workspace-include-globs` to include other workspace files/folders (shown as `included-by-user-rule` in scan output).
 
 ```bash
 clawsync pack --out ./backup
@@ -167,6 +170,7 @@ Installs or updates a managed cron job that periodically runs `clawsync push`.
 - `--every <interval>` (required): interval format (`30m`, `2h`, `1d`)
 - push target and options: same as `clawsync push` target/backend flags
 - `--ignore-paths`: can be set here so scheduled sync keeps ignoring those paths
+- `--workspace-include-globs`: can be set here so scheduled sync keeps the same workspace include rules
 
 ```bash
 clawsync schedule install --every 1d --to-dir ./backup

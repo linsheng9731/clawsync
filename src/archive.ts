@@ -48,14 +48,31 @@ export interface PackScanItem {
   sizeBytes: number;
 }
 
+export type PackScanAction =
+  | "included-default"
+  | "included-config"
+  | "included-by-user-rule"
+  | "ignored-by-config"
+  | "excluded-non-config";
+
+export interface PackScanDecision extends PackScanItem {
+  action: PackScanAction;
+}
+
 export interface PackScanSummary {
   scannedFiles: number;
   scannedBytes: number;
   ignoredFiles: number;
   ignoredBytes: number;
+  excludedNonConfigFiles: number;
+  excludedNonConfigBytes: number;
+  includedConfigFiles: number;
+  includedConfigBytes: number;
+  includedByUserRuleFiles: number;
+  includedByUserRuleBytes: number;
   selectedFiles: number;
   selectedBytes: number;
-  largestItems: PackScanItem[];
+  largestItems: PackScanDecision[];
 }
 
 async function collectEntryFiles(baseDir: string, entry: ScopeEntry, relPath = entry.relPath): Promise<PackScanItem[]> {
@@ -85,40 +102,137 @@ async function collectScannedFiles(config: SyncConfig): Promise<PackScanItem[]> 
   return scanned;
 }
 
-function summarizePackScan(scanned: PackScanItem[], ignorePaths: string[], topN: number): {
+function toGlobRegex(pattern: string): RegExp {
+  const normalized = pattern.replaceAll("\\", "/");
+  let out = "^";
+  for (let i = 0; i < normalized.length; i += 1) {
+    const ch = normalized[i];
+    if (ch === "*") {
+      const next = normalized[i + 1];
+      if (next === "*") {
+        const after = normalized[i + 2];
+        if (after === "/") {
+          out += "(?:.*/)?";
+          i += 2;
+        } else {
+          out += ".*";
+          i += 1;
+        }
+      } else {
+        out += "[^/]*";
+      }
+      continue;
+    }
+    if (ch === "?") {
+      out += "[^/]";
+      continue;
+    }
+    if (/[$()*+.?[\\\]^{|}]/.test(ch)) {
+      out += `\\${ch}`;
+      continue;
+    }
+    out += ch;
+  }
+  out += "$";
+  return new RegExp(out);
+}
+
+function isWorkspaceConfigPath(relPath: string): boolean {
+  if (!relPath.startsWith("workspace/")) return false;
+  const lowered = relPath.toLowerCase();
+  return (
+    lowered.endsWith(".json") ||
+    lowered.endsWith(".json5") ||
+    lowered.endsWith(".yaml") ||
+    lowered.endsWith(".yml") ||
+    lowered.endsWith(".toml") ||
+    lowered.endsWith(".env")
+  );
+}
+
+function normalizeWorkspacePattern(pattern: string): string {
+  const normalized = pattern.trim().replaceAll("\\", "/");
+  if (!normalized) return normalized;
+  if (normalized.endsWith("/")) return `${normalized}**`;
+  return normalized;
+}
+
+function matchesWorkspaceIncludeRule(relPath: string, patterns: string[]): boolean {
+  if (!relPath.startsWith("workspace/")) return false;
+  if (patterns.length === 0) return false;
+  const workspaceRelative = relPath.slice("workspace/".length);
+  return patterns.some((raw) => {
+    const normalized = normalizeWorkspacePattern(raw);
+    if (!normalized) return false;
+    const regex = toGlobRegex(normalized);
+    return regex.test(workspaceRelative) || regex.test(relPath);
+  });
+}
+
+function buildPackDecision(item: PackScanItem, config: SyncConfig): PackScanDecision {
+  if (isIgnoredPath(item.relPath, config.ignorePaths)) {
+    return { ...item, action: "ignored-by-config" };
+  }
+  if (item.component === "workspace") {
+    if (isWorkspaceConfigPath(item.relPath)) {
+      return { ...item, action: "included-config" };
+    }
+    if (matchesWorkspaceIncludeRule(item.relPath, config.workspaceIncludeGlobs)) {
+      return { ...item, action: "included-by-user-rule" };
+    }
+    return { ...item, action: "excluded-non-config" };
+  }
+  return { ...item, action: "included-default" };
+}
+
+function summarizePackScan(scanned: PackScanItem[], config: SyncConfig, topN: number): {
   summary: PackScanSummary;
-  selectedItems: PackScanItem[];
-  ignoredItems: PackScanItem[];
+  selectedItems: PackScanDecision[];
+  allDecisions: PackScanDecision[];
 } {
-  const ignoredItems = scanned.filter((item) => isIgnoredPath(item.relPath, ignorePaths));
-  const selectedItems = scanned.filter((item) => !isIgnoredPath(item.relPath, ignorePaths));
+  const decisions = scanned.map((item) => buildPackDecision(item, config));
+  const selectedItems = decisions.filter((item) =>
+    item.action === "included-default" ||
+    item.action === "included-config" ||
+    item.action === "included-by-user-rule"
+  );
+  const ignoredItems = decisions.filter((item) => item.action === "ignored-by-config");
+  const excludedNonConfigItems = decisions.filter((item) => item.action === "excluded-non-config");
+  const includedConfigItems = decisions.filter((item) => item.action === "included-config");
+  const includedByUserRuleItems = decisions.filter((item) => item.action === "included-by-user-rule");
   const bySizeDesc = [...selectedItems].sort((a, b) => b.sizeBytes - a.sizeBytes);
 
-  const sumBytes = (items: PackScanItem[]): number => items.reduce((acc, item) => acc + item.sizeBytes, 0);
+  const sumBytes = (items: Array<{ sizeBytes: number }>): number => items.reduce((acc, item) => acc + item.sizeBytes, 0);
   const summary: PackScanSummary = {
     scannedFiles: scanned.length,
     scannedBytes: sumBytes(scanned),
     ignoredFiles: ignoredItems.length,
     ignoredBytes: sumBytes(ignoredItems),
+    excludedNonConfigFiles: excludedNonConfigItems.length,
+    excludedNonConfigBytes: sumBytes(excludedNonConfigItems),
+    includedConfigFiles: includedConfigItems.length,
+    includedConfigBytes: sumBytes(includedConfigItems),
+    includedByUserRuleFiles: includedByUserRuleItems.length,
+    includedByUserRuleBytes: sumBytes(includedByUserRuleItems),
     selectedFiles: selectedItems.length,
     selectedBytes: sumBytes(selectedItems),
     largestItems: bySizeDesc.slice(0, Math.max(0, topN)),
   };
-  return { summary, selectedItems, ignoredItems };
+  return { summary, selectedItems, allDecisions: decisions };
 }
 
 export async function scanPackState(
   config: SyncConfig,
   options?: {
     topN?: number;
-    onProgress?: (item: PackScanItem, ignored: boolean) => void;
+    onProgress?: (item: PackScanDecision) => void;
   },
 ): Promise<PackScanSummary> {
   const scanned = await collectScannedFiles(config);
-  for (const item of scanned) {
-    options?.onProgress?.(item, isIgnoredPath(item.relPath, config.ignorePaths));
+  const { summary, allDecisions } = summarizePackScan(scanned, config, options?.topN ?? 5);
+  for (const item of allDecisions) {
+    options?.onProgress?.(item);
   }
-  const { summary } = summarizePackScan(scanned, config.ignorePaths, options?.topN ?? 5);
   return summary;
 }
 
@@ -130,7 +244,7 @@ export interface PreviewResult {
 
 export async function previewPackState(config: SyncConfig): Promise<PreviewResult> {
   const scanned = await collectScannedFiles(config);
-  const { selectedItems } = summarizePackScan(scanned, config.ignorePaths, 0);
+  const { selectedItems } = summarizePackScan(scanned, config, 0);
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "clawsync-preview-"));
   const payload = path.join(tempRoot, "payload");
   await fs.ensureDir(payload);
@@ -158,7 +272,7 @@ export async function previewPackState(config: SyncConfig): Promise<PreviewResul
 
 export async function packState(config: SyncConfig, outDir?: string): Promise<{ archivePath: string; manifest: Manifest }> {
   const scanned = await collectScannedFiles(config);
-  const { selectedItems } = summarizePackScan(scanned, config.ignorePaths, 0);
+  const { selectedItems } = summarizePackScan(scanned, config, 0);
   const tempRoot = outDir ? path.resolve(outDir) : await fs.mkdtemp(path.join(os.tmpdir(), "clawsync-"));
   await fs.ensureDir(tempRoot);
   const staging = path.join(tempRoot, "staging");
@@ -191,6 +305,7 @@ export async function packState(config: SyncConfig, outDir?: string): Promise<{ 
     include: config.include,
     exclude: config.exclude,
     ignorePaths: config.ignorePaths.length > 0 ? [...config.ignorePaths] : undefined,
+    workspaceIncludeGlobs: config.workspaceIncludeGlobs.length > 0 ? [...config.workspaceIncludeGlobs] : undefined,
     files: files.sort(),
     sanitized,
     envVars: Object.keys(envMap).sort(),

@@ -29,6 +29,10 @@ function commonOptions(cmd: Command): Command {
     .option("--include <list>", `components to include: ${listComponents().join(",")}`)
     .option("--exclude <list>", `components to exclude: ${listComponents().join(",")}`)
     .option("--ignore-paths <list>", "comma-separated relative paths to ignore, e.g. workspace/cache,media")
+    .option(
+      "--workspace-include-globs <list>",
+      "comma-separated wildcard patterns to include non-config workspace files/folders",
+    )
     .option("--no-sanitize", "disable sensitive value replacement in sync package");
 }
 
@@ -55,6 +59,7 @@ function buildPushArgsFromOptions(opts: {
   include?: string;
   exclude?: string;
   ignorePaths?: string;
+  workspaceIncludeGlobs?: string;
   sanitize?: boolean;
   toDir?: string;
   toS3?: string;
@@ -71,6 +76,7 @@ function buildPushArgsFromOptions(opts: {
   appendArg(args, "--include", opts.include);
   appendArg(args, "--exclude", opts.exclude);
   appendArg(args, "--ignore-paths", opts.ignorePaths);
+  appendArg(args, "--workspace-include-globs", opts.workspaceIncludeGlobs);
   if (opts.sanitize === false) args.push("--no-sanitize");
 
   appendArg(args, "--to-dir", opts.toDir);
@@ -96,6 +102,7 @@ function buildScheduleHintCommand(opts: {
   include?: string;
   exclude?: string;
   ignorePaths?: string;
+  workspaceIncludeGlobs?: string;
   sanitize?: boolean;
   toDir?: string;
   toS3?: string;
@@ -117,6 +124,7 @@ async function maybePrintScheduleGuidance(opts: {
   include?: string;
   exclude?: string;
   ignorePaths?: string;
+  workspaceIncludeGlobs?: string;
   sanitize?: boolean;
   toDir?: string;
   toS3?: string;
@@ -211,6 +219,13 @@ function printScanSummary(report: Awaited<ReturnType<typeof scanPackState>>): vo
   console.log(`- Scanned files: ${report.scannedFiles}`);
   console.log(`- Scanned size: ${formatBytes(report.scannedBytes)}`);
   console.log(`- Ignored by config: ${report.ignoredFiles} (${formatBytes(report.ignoredBytes)})`);
+  console.log(
+    `- Excluded non-config workspace files: ${report.excludedNonConfigFiles} (${formatBytes(report.excludedNonConfigBytes)})`,
+  );
+  console.log(`- Included config files: ${report.includedConfigFiles} (${formatBytes(report.includedConfigBytes)})`);
+  console.log(
+    `- Included by user rule: ${report.includedByUserRuleFiles} (${formatBytes(report.includedByUserRuleBytes)})`,
+  );
   console.log(`- Selected to sync: ${report.selectedFiles} (${formatBytes(report.selectedBytes)})`);
   if (report.largestItems.length > 0) {
     console.log("### Largest Items");
@@ -299,9 +314,8 @@ commonOptions(
   console.log("scanning files before pack...");
   const scanReport = await scanPackState(cfg, {
     topN: 8,
-    onProgress: (item, ignored) => {
-      const flag = ignored ? "ignored" : "selected";
-      console.log(`scan: ${item.relPath} (${formatBytes(item.sizeBytes)}) [${flag}]`);
+    onProgress: (item) => {
+      console.log(`scan: ${item.relPath} (${formatBytes(item.sizeBytes)}) [${item.action}]`);
     },
   });
   printScanSummary(scanReport);
