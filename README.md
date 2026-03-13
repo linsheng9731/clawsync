@@ -98,7 +98,7 @@ Creates a `tar.gz` archive from selected state files.
 - `--dry-run`: preview selected files and sanitization result without writing archive
 - Before packing, CLI scans file sizes and prints scan progress/summary plus largest items.
 - In interactive terminal, you can choose largest items to ignore for current run.
-- By default, under `workspace/` only config-like files are included (`.json`, `.json5`, `.yaml`, `.yml`, `.toml`, `.env`).
+- By default, under `workspace/` only these folders are included: `memory/`, `skills/`, `config/`.
 - Use `--workspace-include-globs` to include other workspace files/folders (shown as `included-by-user-rule` in scan output).
 
 ```bash

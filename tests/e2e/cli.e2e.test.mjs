@@ -17,6 +17,7 @@ async function mkTmpDir(prefix) {
 }
 
 async function writeStateFixture(stateDir) {
+  await fs.mkdir(path.join(stateDir, "workspace", "config"), { recursive: true });
   await fs.mkdir(path.join(stateDir, "workspace", "project"), { recursive: true });
   await fs.writeFile(
     path.join(stateDir, "openclaw.json"),
@@ -31,7 +32,7 @@ async function writeStateFixture(stateDir) {
   );
   await fs.writeFile(path.join(stateDir, ".env"), "OPENAI_API_KEY=sk-test-secret\nNORMAL_KEY=ok\n", "utf8");
   await fs.writeFile(
-    path.join(stateDir, "workspace", "project", "config.json"),
+    path.join(stateDir, "workspace", "config", "settings.json"),
     JSON.stringify({ password: "my-password", safe: "value" }, null, 2),
     "utf8",
   );
@@ -106,8 +107,7 @@ test("pack/unpack sanitizes secrets and generates env scripts", async () => {
   assert.match(packResult.stdout, /### Largest Items/);
   assert.match(packResult.stdout, /## Pack Report/);
   assert.match(packResult.stdout, /### File Details/);
-  assert.match(packResult.stdout, /- workspace\/project\/config\.json/);
-  assert.match(packResult.stdout, /excluded-non-config/);
+  assert.match(packResult.stdout, /- workspace\/config\/settings\.json/);
   assert.doesNotMatch(packResult.stdout, /- workspace\/project\/notes\.txt/);
   const archivePath = matchLineValue(packResult.stdout, "- Archive:");
   assert.ok(archivePath, "archive path should exist in output");
@@ -140,16 +140,16 @@ test("pack supports ignore-paths and excludes ignored files", async () => {
     "--out",
     outDir,
     "--ignore-paths",
-    "workspace/project/config.json",
+    "workspace/config/settings.json",
   ]);
   assert.equal(packResult.code, 0, packResult.stderr);
   const archivePath = matchLineValue(packResult.stdout, "- Archive:");
   assert.ok(archivePath, "archive path should exist in output");
-  assert.doesNotMatch(packResult.stdout, /- workspace\/project\/config\.json/);
+  assert.doesNotMatch(packResult.stdout, /- workspace\/config\/settings\.json/);
 
   const unpackResult = await runCli(["unpack", "--from", archivePath, "--state-dir", restoreDir]);
   assert.equal(unpackResult.code, 0, unpackResult.stderr);
-  assert.equal(existsSync(path.join(restoreDir, "workspace", "project", "config.json")), false);
+  assert.equal(existsSync(path.join(restoreDir, "workspace", "config", "settings.json")), false);
 });
 
 test("pack supports workspace include globs for non-config files", async () => {
@@ -224,7 +224,7 @@ test("pull with --strategy merge keeps local conflicts and prints conflict detai
 
   const localConfig = await fs.readFile(path.join(localStateDir, "openclaw.json"), "utf8");
   assert.match(localConfig, /local-only-key/);
-  assert.ok(existsSync(path.join(localStateDir, "workspace", "project", "config.json")));
+  assert.ok(existsSync(path.join(localStateDir, "workspace", "config", "settings.json")));
 });
 
 test("merge command performs local-first merge and reports conflicts", async () => {

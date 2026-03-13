@@ -218,14 +218,20 @@ function printScanSummary(report: Awaited<ReturnType<typeof scanPackState>>): vo
   console.log("## Scan Summary");
   console.log(`- Scanned files: ${report.scannedFiles}`);
   console.log(`- Scanned size: ${formatBytes(report.scannedBytes)}`);
-  console.log(`- Ignored by config: ${report.ignoredFiles} (${formatBytes(report.ignoredBytes)})`);
-  console.log(
-    `- Excluded non-config workspace files: ${report.excludedNonConfigFiles} (${formatBytes(report.excludedNonConfigBytes)})`,
-  );
-  console.log(`- Included config files: ${report.includedConfigFiles} (${formatBytes(report.includedConfigBytes)})`);
-  console.log(
-    `- Included by user rule: ${report.includedByUserRuleFiles} (${formatBytes(report.includedByUserRuleBytes)})`,
-  );
+  if (report.ignoredFiles > 0) {
+    console.log(`- Ignored by config: ${report.ignoredFiles} (${formatBytes(report.ignoredBytes)})`);
+  }
+  if (report.excludedNonConfigFiles > 0) {
+    console.log(
+      `- Excluded by workspace whitelist: ${report.excludedNonConfigFiles} (${formatBytes(report.excludedNonConfigBytes)})`,
+    );
+  }
+  console.log(`- Included by default whitelist: ${report.includedConfigFiles} (${formatBytes(report.includedConfigBytes)})`);
+  if (report.includedByUserRuleFiles > 0) {
+    console.log(
+      `- Included by user rule: ${report.includedByUserRuleFiles} (${formatBytes(report.includedByUserRuleBytes)})`,
+    );
+  }
   console.log(`- Selected to sync: ${report.selectedFiles} (${formatBytes(report.selectedBytes)})`);
   if (report.largestItems.length > 0) {
     console.log("### Largest Items");
@@ -315,6 +321,7 @@ commonOptions(
   const scanReport = await scanPackState(cfg, {
     topN: 8,
     onProgress: (item) => {
+      if (item.action === "excluded-non-config") return;
       console.log(`scan: ${item.relPath} (${formatBytes(item.sizeBytes)}) [${item.action}]`);
     },
   });

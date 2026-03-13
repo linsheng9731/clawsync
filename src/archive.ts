@@ -75,11 +75,24 @@ export interface PackScanSummary {
   largestItems: PackScanDecision[];
 }
 
-async function collectEntryFiles(baseDir: string, entry: ScopeEntry, relPath = entry.relPath): Promise<PackScanItem[]> {
+async function collectEntryFiles(
+  baseDir: string,
+  entry: ScopeEntry,
+  config: SyncConfig,
+  relPath = entry.relPath,
+): Promise<PackScanItem[]> {
   const fullPath = path.join(baseDir, relPath);
   const stat = await fs.stat(fullPath);
   if (stat.isFile()) {
-    return [{ component: entry.component, relPath: toPortablePath(relPath), sizeBytes: stat.size }];
+    const portablePath = toPortablePath(relPath);
+    if (entry.component === "workspace") {
+      const whitelistedByDefault = isWorkspaceWhitelistedByDefault(portablePath);
+      const whitelistedByUserRule = matchesWorkspaceIncludeRule(portablePath, config.workspaceIncludeGlobs);
+      if (!whitelistedByDefault && !whitelistedByUserRule) {
+        return [];
+      }
+    }
+    return [{ component: entry.component, relPath: portablePath, sizeBytes: stat.size }];
   }
   if (!stat.isDirectory()) {
     return [];
@@ -87,8 +100,14 @@ async function collectEntryFiles(baseDir: string, entry: ScopeEntry, relPath = e
 
   const children = await fs.readdir(fullPath);
   const files: PackScanItem[] = [];
+  const hasWorkspaceUserRules = config.workspaceIncludeGlobs.length > 0;
   for (const child of children) {
-    files.push(...(await collectEntryFiles(baseDir, entry, path.join(relPath, child))));
+    if (entry.component === "workspace" && relPath === entry.relPath && !hasWorkspaceUserRules) {
+      if (!WORKSPACE_DEFAULT_WHITELIST_DIRS.has(child)) {
+        continue;
+      }
+    }
+    files.push(...(await collectEntryFiles(baseDir, entry, config, path.join(relPath, child))));
   }
   return files;
 }
@@ -97,7 +116,7 @@ async function collectScannedFiles(config: SyncConfig): Promise<PackScanItem[]> 
   const entries = await resolveExistingPaths(config);
   const scanned: PackScanItem[] = [];
   for (const entry of entries) {
-    scanned.push(...(await collectEntryFiles(config.stateDir, entry)));
+    scanned.push(...(await collectEntryFiles(config.stateDir, entry, config)));
   }
   return scanned;
 }
@@ -137,17 +156,12 @@ function toGlobRegex(pattern: string): RegExp {
   return new RegExp(out);
 }
 
-function isWorkspaceConfigPath(relPath: string): boolean {
+const WORKSPACE_DEFAULT_WHITELIST_DIRS = new Set(["memory", "skills", "config"]);
+
+function isWorkspaceWhitelistedByDefault(relPath: string): boolean {
   if (!relPath.startsWith("workspace/")) return false;
-  const lowered = relPath.toLowerCase();
-  return (
-    lowered.endsWith(".json") ||
-    lowered.endsWith(".json5") ||
-    lowered.endsWith(".yaml") ||
-    lowered.endsWith(".yml") ||
-    lowered.endsWith(".toml") ||
-    lowered.endsWith(".env")
-  );
+  const topLevelDir = relPath.split("/")[1];
+  return WORKSPACE_DEFAULT_WHITELIST_DIRS.has(topLevelDir);
 }
 
 function normalizeWorkspacePattern(pattern: string): string {
@@ -174,7 +188,7 @@ function buildPackDecision(item: PackScanItem, config: SyncConfig): PackScanDeci
     return { ...item, action: "ignored-by-config" };
   }
   if (item.component === "workspace") {
-    if (isWorkspaceConfigPath(item.relPath)) {
+    if (isWorkspaceWhitelistedByDefault(item.relPath)) {
       return { ...item, action: "included-config" };
     }
     if (matchesWorkspaceIncludeRule(item.relPath, config.workspaceIncludeGlobs)) {
