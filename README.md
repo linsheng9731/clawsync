@@ -4,7 +4,7 @@ Sync OpenClaw state across machines through local directory, S3-compatible objec
 
 ## Installation
 
-### One-click install from GitHub Releases (macOS/Linux, x64/arm64)
+### One-click install (GitHub Releases)
 
 Install latest:
 
@@ -18,9 +18,7 @@ Install a specific version:
 curl -fsSL "https://raw.githubusercontent.com/linsheng9731/clawsync/main/scripts/install.sh" | CLAWSYNC_GH_REPO="linsheng9731/clawsync" bash -s -- v0.1.1
 ```
 
-Default install path is `~/.local/bin/clawsync`. You can override with `CLAWSYNC_INSTALL_DIR`.
-
-If you see `404`, check whether you used placeholder values like `<owner>/<repo>`.
+Default install path is `~/.local/bin/clawsync`. You can override it with `CLAWSYNC_INSTALL_DIR`.
 
 ### Local development install
 
@@ -31,30 +29,40 @@ npm link
 clawsync --help
 ```
 
-## GitHub Release publishing
+## Usage Workflow
 
-This repository includes workflow `.github/workflows/release.yml`.
-
-- Push tag `vX.Y.Z` to trigger build and release publish.
-- Release assets include prebuilt binaries:
-  - `clawsync-<version>-linux-x64.tar.gz`
-  - `clawsync-<version>-macos-x64.tar.gz`
-  - `clawsync-<version>-macos-arm64.tar.gz`
-  - `clawsync-<version>-windows-x64.zip`
-- Latest aliases are also uploaded for the installer script:
-  - `clawsync-latest-linux-x64.tar.gz`
-  - `clawsync-latest-macos-x64.tar.gz`
-  - `clawsync-latest-macos-arm64.tar.gz`
-  - `clawsync-latest-windows-x64.zip`
-
-Example:
+### 1) One-time initialization
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+clawsync git init --repo-url git@github.com:linsheng9731/openclaw-backup.git --repo-dir ~/.clawsync-repo
 ```
 
-## Command reference
+### 2) Package check (optional but recommended)
+
+```bash
+clawsync pack --dry-run
+clawsync pack
+```
+
+### 3) Push backup
+
+```bash
+clawsync push --to-git --repo-dir ~/.clawsync-repo
+```
+
+### 4) Pull and restore
+
+```bash
+clawsync pull --from-git --repo-url git@github.com:linsheng9731/openclaw-backup.git --repo-dir ~/.clawsync-repo --branch clawsync_20260313
+```
+
+### 5) Local-first merge
+
+```bash
+clawsync merge --from-git --repo-url git@github.com:linsheng9731/openclaw-backup.git --repo-dir ~/.clawsync-repo --branch clawsync_20260313
+```
+
+## Command Reference
 
 All commands support `--help` for full options:
 
@@ -66,10 +74,10 @@ clawsync <command> --help
 
 - `--version`: print current clawsync version
 - `--state-dir <path>`: OpenClaw state directory (default `~/.openclaw` or `OPENCLAW_STATE_DIR`)
-- `--config <path>`: custom sync config file path
+- `--config <path>`: custom config file path
 - `--include <list>`: comma-separated components to include
 - `--exclude <list>`: comma-separated components to exclude
-- `--ignore-paths <list>`: comma-separated relative paths to ignore (supports files or directories)
+- `--ignore-paths <list>`: comma-separated relative paths to ignore (files or directories)
 - `--workspace-include-globs <list>`: wildcard rules to include non-config files/folders under `workspace/`
 - `--no-sanitize`: disable secret placeholder replacement
 
@@ -77,13 +85,24 @@ clawsync <command> --help
 
 Prints version information.
 
-- `-v, --verbose`: includes runtime details (Node.js and platform)
+- `-v, --verbose`: include runtime details (Node.js and platform)
+
+### `clawsync git init`
+
+Initializes or updates the local Git repo used by `clawsync push --to-git`.
+
+- `--repo-url <url>` (required): remote Git URL to set as `origin`
+- `--repo-dir <path>`: local Git repo path (default `~/.clawsync-repo`)
+- `--branch <name>`: initial checkout branch for local repo setup (default `main`)
+
+```bash
+clawsync git init --repo-url git@github.com:you/clawsync-backup.git
+clawsync git init --repo-url git@github.com:you/clawsync-backup.git --repo-dir ~/.clawsync-repo
+```
 
 ### `clawsync scope`
 
 Prints the final selected scope (state dir, include/exclude, and resolved file paths) without creating or modifying any backup.
-
-Common use: verify scope rules before running `pack`, `push`, or scheduled jobs.
 
 ```bash
 clawsync scope
@@ -96,10 +115,10 @@ Creates a `tar.gz` archive from selected state files.
 
 - `--out <dir>`: output directory for the generated archive
 - `--dry-run`: preview selected files and sanitization result without writing archive
-- Before packing, CLI scans file sizes and prints scan progress/summary plus largest items.
-- In interactive terminal, you can choose largest items to ignore for current run.
-- By default, under `workspace/` only these folders are included: `memory/`, `skills/`, `config/`.
-- Use `--workspace-include-globs` to include other workspace files/folders (shown as `included-by-user-rule` in scan output).
+- scans file sizes before packing and prints progress/summary plus largest items
+- in interactive terminal, you can choose large items to ignore for current run
+- by default, under `workspace/` only `memory/`, `skills/`, and `config/` are included
+- use `--workspace-include-globs` to include other workspace files/folders
 
 ```bash
 clawsync pack --out ./backup
@@ -121,7 +140,7 @@ clawsync unpack --from ./backup/clawsync-xxx.tar.gz --strategy merge
 
 ### `clawsync push`
 
-Packs state, then uploads/publishes archive to **one** backend target.
+Packs state, then uploads/publishes archive to one backend target.
 
 - `--to-dir <path>`: directory backend target
 - `--to-s3 <s3Uri>`: S3 backend target
@@ -130,12 +149,13 @@ Packs state, then uploads/publishes archive to **one** backend target.
 - `--reuse-message-channel <mode>`: OpenClaw message channel behavior (`yes` | `no`)
 - backend-specific:
   - S3: `--s3-endpoint <url>`
-  - Git: `--repo-dir <path>`, `--repo-url <url>`, `--branch <name>`
+  - Git: `--repo-dir <path>`, `--branch <name>`
+  - Git default branch: `clawsync_YYYYMMDD` (for example `clawsync_20260313`)
 
 ```bash
 clawsync push --to-dir ./backup
 clawsync push --to-s3 s3://my-bucket/openclaw --s3-endpoint http://127.0.0.1:9000
-clawsync push --to-git --repo-url git@github.com:you/clawsync-backup.git --branch main
+clawsync push --to-git --repo-dir ~/.clawsync-repo
 ```
 
 ### `clawsync pull`
@@ -156,7 +176,7 @@ clawsync pull --from-git --repo-url git@github.com:you/clawsync-backup.git --bra
 
 ### `clawsync merge`
 
-Same source options as `pull`, but always uses local-first merge behavior (keeps local files on conflicts, adds missing files from backup).
+Same source options as `pull`, but always uses local-first merge behavior (keeps local files on conflicts and only adds missing files from backup).
 
 ```bash
 clawsync merge --from-dir ./backup
@@ -169,12 +189,14 @@ Installs or updates a managed cron job that periodically runs `clawsync push`.
 
 - `--every <interval>` (required): interval format (`30m`, `2h`, `1d`)
 - push target and options: same as `clawsync push` target/backend flags
-- `--ignore-paths`: can be set here so scheduled sync keeps ignoring those paths
-- `--workspace-include-globs`: can be set here so scheduled sync keeps the same workspace include rules
+- `--ignore-paths`: persisted ignored paths for scheduled sync
+- `--workspace-include-globs`: persisted workspace include rules for scheduled sync
+- when using `--to-git`, run `clawsync git init --repo-url ...` first
 
 ```bash
 clawsync schedule install --every 1d --to-dir ./backup
 clawsync schedule install --every 2h --to-s3 s3://my-bucket/openclaw
+clawsync schedule install --every 1d --to-git --repo-dir ~/.clawsync-repo
 ```
 
 ### `clawsync schedule status`
@@ -193,7 +215,7 @@ Removes the managed cron schedule entry created by `clawsync schedule install`.
 clawsync schedule remove
 ```
 
-## Features
+## Feature Overview
 
 ### 1) Scope-based state selection
 
@@ -211,97 +233,28 @@ Default behavior:
 - include: `config,workspace`
 - exclude: `credentials,sessions,tools,media`
 
-Use:
-
-```bash
-clawsync scope
-clawsync scope --include config,workspace,sessions --exclude credentials
-```
-
 ### 2) Archive pack/unpack
 
-Create and restore `tar.gz` sync archives:
-
-```bash
-clawsync pack --out ./backup
-clawsync unpack --from ./backup/clawsync-xxx.tar.gz
-clawsync unpack --from ./backup/clawsync-xxx.tar.gz --strategy skip
-clawsync unpack --from ./backup/clawsync-xxx.tar.gz --strategy merge
-```
+Create and restore `tar.gz` sync archives with `pack` and `unpack`.
 
 ### 3) Multi-backend push/pull
 
-#### Directory backend
+Supports directory, S3-compatible storage, and Git repository backends.
 
-```bash
-clawsync push --to-dir ./backup
-clawsync pull --from-dir ./backup
-clawsync pull --from-dir ./backup --strategy merge
-clawsync merge --from-dir ./backup
-```
-
-#### S3 backend
-
-```bash
-clawsync push --to-s3 s3://my-bucket/openclaw
-clawsync pull --from-s3 s3://my-bucket/openclaw
-```
-
-Custom S3 endpoint is supported:
-
-```bash
-clawsync push --to-s3 s3://my-bucket/openclaw --s3-endpoint http://127.0.0.1:9000
-```
-
-#### Git backend
-
-```bash
-clawsync push --to-git --repo-url git@github.com:you/clawsync-backup.git --branch main
-clawsync pull --from-git --repo-url git@github.com:you/clawsync-backup.git --branch main
-clawsync merge --from-git --repo-url git@github.com:you/clawsync-backup.git --branch main
-```
-
-Optional local repo cache path:
-
-```bash
-clawsync push --to-git --repo-dir ~/.clawsync-repo
-```
-
-### 4) Sanitization and secret recovery scripts
+### 4) Sanitization and env recovery scripts
 
 By default, archives are sanitized:
 
 - sensitive values are replaced by `${CLAWSYNC_*}`
 - original values are stored in `secrets.json`
-- after `pull`/`unpack`, environment scripts are generated:
+- after `pull`/`unpack`, env scripts are generated:
   - `env-export.sh`
   - `env-export.ps1`
   - `env-export.cmd`
 
-Disable sanitization only when you intentionally need raw values:
-
-```bash
-clawsync pack --no-sanitize --out ./backup
-```
-
 ### 5) Local-first merge and conflict report
 
-`merge` strategy keeps local files when conflicts happen, and only adds missing files from backup.
-
-Use one of these:
-
-```bash
-clawsync pull --from-dir ./backup --strategy merge
-clawsync merge --from-dir ./backup
-```
-
-Merge output includes a conflict report with per-file details:
-
-- total files scanned
-- merged new files
-- kept local files
-- conflict count
-- conflict details with `path` and `reason`
+`merge` keeps local files when conflicts happen and only adds missing files from backup, with per-file conflict details.
 
 ### 6) Dry-run preview
 
@@ -309,33 +262,14 @@ Preview behavior without writing archives or uploading:
 
 ```bash
 clawsync pack --dry-run
-clawsync push --to-git --repo-url git@github.com:you/clawsync-backup.git --dry-run
+clawsync push --to-git --repo-dir ~/.clawsync-repo --dry-run
 ```
 
 ### 7) Managed scheduled backup (cron)
 
-Install/update managed cron entry:
+Install/update/check/remove managed cron entries through `clawsync schedule`.
 
-```bash
-clawsync schedule install --every 1d --to-dir ./backup
-clawsync schedule install --every 2h --to-s3 s3://my-bucket/openclaw
-clawsync schedule install --every 1d --to-git --repo-url git@github.com:you/clawsync-backup.git --branch main
-```
-
-Manage schedule:
-
-```bash
-clawsync schedule status
-clawsync schedule remove
-```
-
-Notes:
-
-- interval supports `m` / `h` / `d` (`30m`, `2h`, `1d`)
-- cron logs are written to `~/.openclaw/logs/sync-cron.log` (or under `--state-dir`)
-- install is idempotent and replaces existing managed entry
-
-## Optional config file
+## Optional Config File
 
 Default config path: `~/.openclaw/clawsync.json`
 
@@ -351,7 +285,7 @@ Default config path: `~/.openclaw/clawsync.json`
 
 CLI flags override config file values.
 
-## End-to-end tests (feature-oriented)
+## End-to-End Tests
 
 E2E suite path: `tests/e2e/cli.e2e.test.mjs`
 
@@ -361,27 +295,12 @@ Run:
 npm test
 ```
 
-### Coverage matrix
+Coverage includes scope selection, archive pack/unpack, directory/S3/Git backend round trips, dry-run behavior, and schedule lifecycle.
 
-- `scope`: default component selection and resolved paths
-- `pack` + `unpack`: archive generation, restore, sanitize placeholders, env-export scripts
-- `push/pull --to-dir/--from-dir`: full round trip through directory backend
-- `push/pull --to-git/--from-git`: full round trip using local bare remote repository
-- `push/pull --to-s3/--from-s3`: full round trip using embedded local S3 server (`s3rver`)
-- `push --dry-run`: preview output, target summary, and `--reuse-message-channel yes|no` validation
-- `schedule install/status/remove`: full lifecycle using mocked `crontab` command to avoid touching host cron
-
-### Test design principles
-
-- feature-first: each case maps to user-visible capability
-- real CLI execution: tests call built `dist/cli.js` as subprocess
-- isolated environment: each test uses temporary directories and disposable backends
-- no host side effects: cron tests replace `crontab` with a test shim
-
-## Security notes
+## Security Notes
 
 - `credentials` and `.env` may contain secrets
-- keep git remotes private if syncing sensitive content
+- keep Git remotes private if syncing sensitive content
 - prefer excluding `credentials` unless required
 - keep `sanitize` enabled for automated backups
-- generated env scripts contain plaintext secrets and must stay local
+- generated env scripts contain plaintext secrets and should stay local

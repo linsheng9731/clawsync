@@ -7,9 +7,14 @@ import { Command } from "commander";
 import { buildSyncConfig, listComponents, resolveStateDir } from "./config.js";
 import { resolveEntries } from "./scope.js";
 import { packState, previewPackState, scanPackState, unpackState } from "./archive.js";
-import { pushToDir, resolveFromDir } from "./backends/dir.js";
-import { pushToS3, pullFromS3 } from "./backends/s3.js";
-import { pushToGit, pullFromGit } from "./backends/git.js";
+import {
+  canPushToGit,
+  getDefaultGitPushBranch,
+  getDefaultGitRepoDir,
+  initGitRepo,
+  pushToGit,
+  pullFromGit,
+} from "./backends/git.js";
 import {
   buildCronCommand,
   buildManagedCronLine,
@@ -36,10 +41,6 @@ function commonOptions(cmd: Command): Command {
     .option("--no-sanitize", "disable sensitive value replacement in sync package");
 }
 
-function countPushTargets(opts: { toDir?: string; toS3?: string; toGit?: boolean }): number {
-  return [Boolean(opts.toDir), Boolean(opts.toS3), Boolean(opts.toGit)].filter(Boolean).length;
-}
-
 function appendArg(args: string[], name: string, value?: string): void {
   if (!value) return;
   args.push(name, value);
@@ -53,6 +54,15 @@ function parseYesNoOption(raw: string | undefined, optionName: string): boolean 
   throw new Error(`Invalid value for ${optionName}: ${raw}. Allowed values: yes, no`);
 }
 
+async function ensureGitPushTargetReady(repoDir?: string): Promise<void> {
+  const result = await canPushToGit({ repoDir });
+  if (result.originUrl) return;
+  const resolvedRepoDir = repoDir ? path.resolve(repoDir) : getDefaultGitRepoDir();
+  throw new Error(
+    `Git target is not initialized at ${resolvedRepoDir}. Run: clawsync git init --repo-url <your-repo-url>${repoDir ? ` --repo-dir ${resolvedRepoDir}` : ""}`,
+  );
+}
+
 function buildPushArgsFromOptions(opts: {
   stateDir?: string;
   config?: string;
@@ -61,12 +71,7 @@ function buildPushArgsFromOptions(opts: {
   ignorePaths?: string;
   workspaceIncludeGlobs?: string;
   sanitize?: boolean;
-  toDir?: string;
-  toS3?: string;
-  toGit?: boolean;
-  s3Endpoint?: string;
   repoDir?: string;
-  repoUrl?: string;
   branch?: string;
   reuseMessageChannel?: string;
 }): string[] {
@@ -78,13 +83,7 @@ function buildPushArgsFromOptions(opts: {
   appendArg(args, "--ignore-paths", opts.ignorePaths);
   appendArg(args, "--workspace-include-globs", opts.workspaceIncludeGlobs);
   if (opts.sanitize === false) args.push("--no-sanitize");
-
-  appendArg(args, "--to-dir", opts.toDir);
-  appendArg(args, "--to-s3", opts.toS3);
-  if (opts.toGit) args.push("--to-git");
-  appendArg(args, "--s3-endpoint", opts.s3Endpoint);
   appendArg(args, "--repo-dir", opts.repoDir);
-  appendArg(args, "--repo-url", opts.repoUrl);
   appendArg(args, "--branch", opts.branch);
   appendArg(args, "--reuse-message-channel", opts.reuseMessageChannel);
   return args;
@@ -104,12 +103,7 @@ function buildScheduleHintCommand(opts: {
   ignorePaths?: string;
   workspaceIncludeGlobs?: string;
   sanitize?: boolean;
-  toDir?: string;
-  toS3?: string;
-  toGit?: boolean;
-  s3Endpoint?: string;
   repoDir?: string;
-  repoUrl?: string;
   branch?: string;
   reuseMessageChannel?: string;
 }): string {
@@ -126,12 +120,7 @@ async function maybePrintScheduleGuidance(opts: {
   ignorePaths?: string;
   workspaceIncludeGlobs?: string;
   sanitize?: boolean;
-  toDir?: string;
-  toS3?: string;
-  toGit?: boolean;
-  s3Endpoint?: string;
   repoDir?: string;
-  repoUrl?: string;
   branch?: string;
   reuseMessageChannel?: string;
 }): Promise<void> {
@@ -148,30 +137,18 @@ async function maybePrintScheduleGuidance(opts: {
 }
 
 interface PullSourceOptions {
-  fromDir?: string;
-  fromS3?: string;
-  fromGit?: boolean;
-  s3Endpoint?: string;
   repoDir?: string;
   repoUrl?: string;
   branch?: string;
 }
 
 async function resolveArchiveFromSource(opts: PullSourceOptions, tempOut: string): Promise<string> {
-  if (opts.fromDir) {
-    return resolveFromDir(opts.fromDir);
-  }
-  if (opts.fromS3) {
-    return pullFromS3(opts.fromS3, tempOut, opts.s3Endpoint);
-  }
-  if (opts.fromGit) {
-    return pullFromGit({
-      repoDir: opts.repoDir,
-      repoUrl: opts.repoUrl,
-      branch: opts.branch,
-    });
-  }
-  throw new Error("Specify one source: --from-dir, --from-s3, or --from-git");
+  void tempOut;
+  return pullFromGit({
+    repoDir: opts.repoDir,
+    repoUrl: opts.repoUrl,
+    branch: opts.branch,
+  });
 }
 
 function printMergeReport(report?: MergeReport): void {
@@ -281,7 +258,7 @@ async function chooseLargestItemsToIgnore(
 
 program
   .name("clawsync")
-  .description("Sync OpenClaw config/state to directory, S3, or Git")
+  .description("Sync OpenClaw config/state with Git backend")
   .version("0.1.1", "--version", "output the current version");
 
 program
@@ -293,6 +270,26 @@ program
     if (!opts.verbose) return;
     console.log(`node: ${process.version}`);
     console.log(`platform: ${process.platform}/${process.arch}`);
+  });
+
+const gitProgram = program.command("git").description("Manage clawsync git backend");
+
+gitProgram
+  .command("init")
+  .description("Initialize local git repo and origin for clawsync push")
+  .requiredOption("--repo-url <url>", "git remote origin url")
+  .option("--repo-dir <path>", "local git repo directory")
+  .option("--branch <name>", "initial checkout branch", "main")
+  .action(async (opts) => {
+    const result = await initGitRepo({
+      repoDir: opts.repoDir,
+      repoUrl: opts.repoUrl,
+      branch: opts.branch,
+    });
+    console.log("git backend initialized.");
+    console.log(`repo: ${result.repoDir}`);
+    console.log(`origin: ${result.originUrl}`);
+    console.log(`branch: ${result.branch}`);
   });
 
 commonOptions(
@@ -379,18 +376,14 @@ program
 commonOptions(
   program
     .command("push")
-    .description("Pack then push to a backend")
-    .option("--to-dir <path>", "target directory")
-    .option("--to-s3 <s3Uri>", "target s3 uri like s3://bucket/prefix")
-    .option("--to-git", "use git backend")
-    .option("--s3-endpoint <url>", "custom s3 endpoint")
+    .description("Pack then push to git backend")
     .option("--repo-dir <path>", "local git repo directory")
-    .option("--repo-url <url>", "git remote origin url")
-    .option("--branch <name>", "git branch", "main")
+    .option("--branch <name>", "git branch; default clawsync_<YYYYMMDD>")
     .option("--reuse-message-channel <mode>", "reuse OpenClaw message channel: yes|no")
     .option("--dry-run", "preview selected files and sanitization without pushing")
 ).action(async (opts) => {
   const reuseMessageChannel = parseYesNoOption(opts.reuseMessageChannel, "--reuse-message-channel");
+  await ensureGitPushTargetReady(opts.repoDir);
   const cfg = await buildSyncConfig(opts);
   if (opts.dryRun) {
     const preview = await previewPackState(cfg);
@@ -404,39 +397,21 @@ commonOptions(
       console.log("env vars:");
       for (const key of preview.envVars) console.log(`- ${key}`);
     }
-    if (opts.toDir) console.log(`target: dir ${opts.toDir}`);
-    if (opts.toS3) console.log(`target: s3 ${opts.toS3}`);
-    if (opts.toGit) console.log(`target: git ${opts.repoUrl ?? opts.repoDir ?? "~/.clawsync-repo"}`);
+    const repoTarget = opts.repoDir ?? "~/.clawsync-repo";
+    const branch = opts.branch ?? getDefaultGitPushBranch();
+    console.log(`target: git ${repoTarget} (branch: ${branch})`);
     if (reuseMessageChannel !== undefined) {
       console.log(`reuse message channel: ${reuseMessageChannel ? "yes" : "no"}`);
     }
     return;
   }
   const { archivePath } = await packState(cfg);
-
-  if (opts.toDir) {
-    const finalPath = await pushToDir(archivePath, opts.toDir);
-    console.log(`pushed to dir: ${finalPath}`);
-    await maybePrintScheduleGuidance(opts);
-    return;
-  }
-  if (opts.toS3) {
-    const uri = await pushToS3(archivePath, opts.toS3, opts.s3Endpoint);
-    console.log(`pushed to s3: ${uri}`);
-    await maybePrintScheduleGuidance(opts);
-    return;
-  }
-  if (opts.toGit) {
-    const repoPath = await pushToGit(archivePath, {
-      repoDir: opts.repoDir,
-      repoUrl: opts.repoUrl,
-      branch: opts.branch,
-    });
-    console.log(`pushed to git repo: ${repoPath}`);
-    await maybePrintScheduleGuidance(opts);
-    return;
-  }
-  throw new Error("Specify one target: --to-dir, --to-s3, or --to-git");
+  const repoPath = await pushToGit(archivePath, {
+    repoDir: opts.repoDir,
+    branch: opts.branch,
+  });
+  console.log(`pushed to git repo: ${repoPath}`);
+  await maybePrintScheduleGuidance(opts);
 });
 
 const scheduleProgram = program
@@ -448,19 +423,12 @@ commonOptions(
     .command("install")
     .description("Install (or update) a managed cron schedule for push")
     .requiredOption("--every <interval>", "interval like 30m, 2h, 1d")
-    .option("--to-dir <path>", "target directory")
-    .option("--to-s3 <s3Uri>", "target s3 uri like s3://bucket/prefix")
-    .option("--to-git", "use git backend")
-    .option("--s3-endpoint <url>", "custom s3 endpoint")
     .option("--repo-dir <path>", "local git repo directory")
-    .option("--repo-url <url>", "git remote origin url")
-    .option("--branch <name>", "git branch", "main")
+    .option("--branch <name>", "git branch; default clawsync_<YYYYMMDD>")
     .option("--reuse-message-channel <mode>", "reuse OpenClaw message channel in notifications: yes|no")
 ).action(async (opts) => {
-  if (countPushTargets(opts) !== 1) {
-    throw new Error("Specify exactly one target: --to-dir, --to-s3, or --to-git");
-  }
   parseYesNoOption(opts.reuseMessageChannel, "--reuse-message-channel");
+  await ensureGitPushTargetReady(opts.repoDir);
 
   const cronExpression = parseInterval(opts.every);
   const pushArgs = buildPushArgsFromOptions(opts);
@@ -513,11 +481,7 @@ scheduleProgram
 
 program
   .command("pull")
-  .description("Pull from backend then unpack")
-  .option("--from-dir <path>", "source directory or archive path")
-  .option("--from-s3 <s3Uri>", "source s3 uri like s3://bucket/prefix")
-  .option("--from-git", "use git backend")
-  .option("--s3-endpoint <url>", "custom s3 endpoint")
+  .description("Pull from git then unpack")
   .option("--repo-dir <path>", "local git repo directory")
   .option("--repo-url <url>", "git remote origin url")
   .option("--branch <name>", "git branch", "main")
@@ -542,11 +506,7 @@ program
 
 program
   .command("merge")
-  .description("Pull from backend and merge into state directory (local-first)")
-  .option("--from-dir <path>", "source directory or archive path")
-  .option("--from-s3 <s3Uri>", "source s3 uri like s3://bucket/prefix")
-  .option("--from-git", "use git backend")
-  .option("--s3-endpoint <url>", "custom s3 endpoint")
+  .description("Pull from git and merge into state directory (local-first)")
   .option("--repo-dir <path>", "local git repo directory")
   .option("--repo-url <url>", "git remote origin url")
   .option("--branch <name>", "git branch", "main")

@@ -6,7 +6,6 @@ import fs from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import S3rver from "s3rver";
 
 const execFileAsync = promisify(execFile);
 const ROOT = process.cwd();
@@ -70,6 +69,34 @@ function matchLineValue(output, prefix) {
     .map((item) => item.trim())
     .find((item) => item.startsWith(prefix));
   return line ? line.slice(prefix.length).trim() : "";
+}
+
+async function setupGitBackupFromState(stateDir, branch = "main") {
+  const remoteBare = await mkTmpDir("git-remote");
+  const repoDirPush = await mkTmpDir("git-repo-push");
+  await execFileAsync("git", ["init", "--bare"], { cwd: remoteBare });
+  const initResult = await runCli([
+    "git",
+    "init",
+    "--repo-url",
+    remoteBare,
+    "--repo-dir",
+    repoDirPush,
+    "--branch",
+    branch,
+  ]);
+  assert.equal(initResult.code, 0, initResult.stderr);
+  const pushResult = await runCli([
+    "push",
+    "--state-dir",
+    stateDir,
+    "--repo-dir",
+    repoDirPush,
+    "--branch",
+    branch,
+  ]);
+  assert.equal(pushResult.code, 0, pushResult.stderr);
+  return { remoteBare, repoDirPush };
 }
 
 test("scope shows default selected components", async () => {
@@ -178,29 +205,11 @@ test("pack supports workspace include globs for non-config files", async () => {
   assert.equal(existsSync(path.join(restoreDir, "workspace", "project", "notes.txt")), true);
 });
 
-test("push/pull with directory backend", async () => {
-  const stateDir = await mkTmpDir("dir");
-  const backupDir = await mkTmpDir("dir-backup");
-  const restoreDir = await mkTmpDir("dir-restore");
-  await writeStateFixture(stateDir);
-
-  const pushResult = await runCli(["push", "--state-dir", stateDir, "--to-dir", backupDir]);
-  assert.equal(pushResult.code, 0, pushResult.stderr);
-  assert.ok(existsSync(path.join(backupDir, "latest.txt")));
-
-  const pullResult = await runCli(["pull", "--from-dir", backupDir, "--state-dir", restoreDir]);
-  assert.equal(pullResult.code, 0, pullResult.stderr);
-  assert.ok(existsSync(path.join(restoreDir, "openclaw.json")));
-});
-
 test("pull with --strategy merge keeps local conflicts and prints conflict details", async () => {
   const sourceStateDir = await mkTmpDir("merge-source");
-  const backupDir = await mkTmpDir("merge-backup");
   const localStateDir = await mkTmpDir("merge-local");
   await writeStateFixture(sourceStateDir);
-
-  const pushResult = await runCli(["push", "--state-dir", sourceStateDir, "--to-dir", backupDir]);
-  assert.equal(pushResult.code, 0, pushResult.stderr);
+  const { remoteBare } = await setupGitBackupFromState(sourceStateDir, "main");
 
   await fs.writeFile(
     path.join(localStateDir, "openclaw.json"),
@@ -210,8 +219,8 @@ test("pull with --strategy merge keeps local conflicts and prints conflict detai
 
   const mergeResult = await runCli([
     "pull",
-    "--from-dir",
-    backupDir,
+    "--repo-url",
+    remoteBare,
     "--state-dir",
     localStateDir,
     "--strategy",
@@ -229,19 +238,16 @@ test("pull with --strategy merge keeps local conflicts and prints conflict detai
 
 test("merge command performs local-first merge and reports conflicts", async () => {
   const sourceStateDir = await mkTmpDir("merge-cmd-source");
-  const backupDir = await mkTmpDir("merge-cmd-backup");
   const localStateDir = await mkTmpDir("merge-cmd-local");
   await writeStateFixture(sourceStateDir);
-
-  const pushResult = await runCli(["push", "--state-dir", sourceStateDir, "--to-dir", backupDir]);
-  assert.equal(pushResult.code, 0, pushResult.stderr);
+  const { remoteBare } = await setupGitBackupFromState(sourceStateDir, "main");
 
   await fs.writeFile(path.join(localStateDir, "openclaw.json"), "{\"auth\":{\"apiKey\":\"local\"}}", "utf8");
 
   const mergeResult = await runCli([
     "merge",
-    "--from-dir",
-    backupDir,
+    "--repo-url",
+    remoteBare,
     "--state-dir",
     localStateDir,
   ]);
@@ -253,11 +259,23 @@ test("merge command performs local-first merge and reports conflicts", async () 
 
 test("merge does not report conflicts for identical local files", async () => {
   const sourceStateDir = await mkTmpDir("merge-identical-source");
-  const backupDir = await mkTmpDir("merge-identical-backup");
   const localStateDir = await mkTmpDir("merge-identical-local");
   await writeStateFixture(sourceStateDir);
-
-  const pushResult = await runCli(["push", "--state-dir", sourceStateDir, "--to-dir", backupDir, "--no-sanitize"]);
+  const remoteBare = await mkTmpDir("merge-identical-remote");
+  const repoDir = await mkTmpDir("merge-identical-repo");
+  await execFileAsync("git", ["init", "--bare"], { cwd: remoteBare });
+  const initResult = await runCli(["git", "init", "--repo-url", remoteBare, "--repo-dir", repoDir, "--branch", "main"]);
+  assert.equal(initResult.code, 0, initResult.stderr);
+  const pushResult = await runCli([
+    "push",
+    "--state-dir",
+    sourceStateDir,
+    "--repo-dir",
+    repoDir,
+    "--branch",
+    "main",
+    "--no-sanitize",
+  ]);
   assert.equal(pushResult.code, 0, pushResult.stderr);
 
   const originalConfig = await fs.readFile(path.join(sourceStateDir, "openclaw.json"), "utf8");
@@ -265,8 +283,8 @@ test("merge does not report conflicts for identical local files", async () => {
 
   const mergeResult = await runCli([
     "pull",
-    "--from-dir",
-    backupDir,
+    "--repo-url",
+    remoteBare,
     "--state-dir",
     localStateDir,
     "--strategy",
@@ -284,14 +302,22 @@ test("push/pull with git backend and local bare remote", async () => {
   const restoreDir = await mkTmpDir("git-restore");
   await writeStateFixture(stateDir);
   await execFileAsync("git", ["init", "--bare"], { cwd: remoteBare });
+  const initResult = await runCli([
+    "git",
+    "init",
+    "--repo-url",
+    remoteBare,
+    "--repo-dir",
+    repoDirPush,
+    "--branch",
+    "main",
+  ]);
+  assert.equal(initResult.code, 0, initResult.stderr);
 
   const pushResult = await runCli([
     "push",
     "--state-dir",
     stateDir,
-    "--to-git",
-    "--repo-url",
-    remoteBare,
     "--repo-dir",
     repoDirPush,
     "--branch",
@@ -302,7 +328,6 @@ test("push/pull with git backend and local bare remote", async () => {
 
   const pullResult = await runCli([
     "pull",
-    "--from-git",
     "--repo-url",
     remoteBare,
     "--repo-dir",
@@ -316,90 +341,97 @@ test("push/pull with git backend and local bare remote", async () => {
   assert.ok(existsSync(path.join(restoreDir, "openclaw.json")));
 });
 
-test("push/pull with S3 backend via local s3rver", async () => {
-  const stateDir = await mkTmpDir("s3");
-  const s3DataDir = await mkTmpDir("s3-data");
-  const restoreDir = await mkTmpDir("s3-restore");
+test("push with git backend defaults branch to clawsync_<YYYYMMDD>", async () => {
+  const stateDir = await mkTmpDir("git-default-branch");
+  const remoteBare = await mkTmpDir("git-default-branch-remote");
+  const repoDir = await mkTmpDir("git-default-branch-repo");
+  await writeStateFixture(stateDir);
+  await execFileAsync("git", ["init", "--bare"], { cwd: remoteBare });
+  const initResult = await runCli(["git", "init", "--repo-url", remoteBare, "--repo-dir", repoDir]);
+  assert.equal(initResult.code, 0, initResult.stderr);
+
+  const pushResult = await runCli([
+    "push",
+    "--state-dir",
+    stateDir,
+    "--repo-dir",
+    repoDir,
+  ]);
+  assert.equal(pushResult.code, 0, pushResult.stderr);
+
+  const today = new Date();
+  const y = String(today.getFullYear());
+  const m = String(today.getMonth() + 1).padStart(2, "0");
+  const d = String(today.getDate()).padStart(2, "0");
+  const expectedBranch = `clawsync_${y}${m}${d}`;
+  const remoteBranch = await execFileAsync("git", ["show-ref", "--verify", `refs/heads/${expectedBranch}`], {
+    cwd: remoteBare,
+  });
+  assert.ok(remoteBranch.stdout.trim().length > 0);
+});
+
+test("git init can update origin for existing repo-dir", async () => {
+  const remoteA = await mkTmpDir("git-reinit-remote-a");
+  const remoteB = await mkTmpDir("git-reinit-remote-b");
+  const repoDir = await mkTmpDir("git-reinit-repo");
+  await execFileAsync("git", ["init", "--bare"], { cwd: remoteA });
+  await execFileAsync("git", ["init", "--bare"], { cwd: remoteB });
+
+  const firstInit = await runCli(["git", "init", "--repo-url", remoteA, "--repo-dir", repoDir]);
+  assert.equal(firstInit.code, 0, firstInit.stderr);
+  const secondInit = await runCli(["git", "init", "--repo-url", remoteB, "--repo-dir", repoDir]);
+  assert.equal(secondInit.code, 0, secondInit.stderr);
+
+  const originUrl = await execFileAsync("git", ["remote", "get-url", "origin"], { cwd: repoDir });
+  assert.equal(originUrl.stdout.trim(), remoteB);
+});
+
+test("push to git without init shows guidance", async () => {
+  const stateDir = await mkTmpDir("git-push-no-init-state");
+  const repoDir = await mkTmpDir("git-push-no-init-repo");
   await writeStateFixture(stateDir);
 
-  const port = 4569;
-  const endpoint = `http://127.0.0.1:${port}`;
-  const bucket = "openclaw-bucket";
-  const prefix = "sync";
-  const s3rver = new S3rver({
-    address: "127.0.0.1",
-    port,
-    directory: s3DataDir,
-    silent: true,
-    configureBuckets: [{ name: bucket }],
-  });
-  await s3rver.run();
-
-  try {
-    const env = {
-      AWS_ACCESS_KEY_ID: "S3RVER",
-      AWS_SECRET_ACCESS_KEY: "S3RVER",
-      AWS_REGION: "us-east-1",
-    };
-    const pushResult = await runCli(
-      [
-        "push",
-        "--state-dir",
-        stateDir,
-        "--to-s3",
-        `s3://${bucket}/${prefix}`,
-        "--s3-endpoint",
-        endpoint,
-      ],
-      env,
-    );
-    assert.equal(pushResult.code, 0, pushResult.stderr);
-
-    const pullResult = await runCli(
-      [
-        "pull",
-        "--from-s3",
-        `s3://${bucket}/${prefix}`,
-        "--s3-endpoint",
-        endpoint,
-        "--state-dir",
-        restoreDir,
-      ],
-      env,
-    );
-    assert.equal(pullResult.code, 0, pullResult.stderr);
-    assert.ok(existsSync(path.join(restoreDir, "openclaw.json")));
-  } finally {
-    await s3rver.close();
-  }
+  const pushResult = await runCli([
+    "push",
+    "--state-dir",
+    stateDir,
+    "--repo-dir",
+    repoDir,
+  ]);
+  assert.notEqual(pushResult.code, 0);
+  assert.match(pushResult.stderr, /clawsync git init --repo-url/);
 });
 
 test("dry-run preview works and reuse-message-channel validates yes/no", async () => {
   const stateDir = await mkTmpDir("dry-run");
-  const backupDir = await mkTmpDir("dry-run-backup");
+  const remoteBare = await mkTmpDir("dry-run-remote");
+  const repoDir = await mkTmpDir("dry-run-repo");
   await writeStateFixture(stateDir);
+  await execFileAsync("git", ["init", "--bare"], { cwd: remoteBare });
+  const initResult = await runCli(["git", "init", "--repo-url", remoteBare, "--repo-dir", repoDir]);
+  assert.equal(initResult.code, 0, initResult.stderr);
 
   const dryRun = await runCli([
     "push",
     "--state-dir",
     stateDir,
-    "--to-dir",
-    backupDir,
+    "--repo-dir",
+    repoDir,
     "--dry-run",
     "--reuse-message-channel",
     "yes",
   ]);
   assert.equal(dryRun.code, 0, dryRun.stderr);
   assert.match(dryRun.stdout, /dry-run mode/);
-  assert.match(dryRun.stdout, /target: dir/);
+  assert.match(dryRun.stdout, /target: git/);
   assert.match(dryRun.stdout, /reuse message channel: yes/);
 
   const invalid = await runCli([
     "push",
     "--state-dir",
     stateDir,
-    "--to-dir",
-    backupDir,
+    "--repo-dir",
+    repoDir,
     "--reuse-message-channel",
     "maybe",
   ]);
@@ -409,7 +441,8 @@ test("dry-run preview works and reuse-message-channel validates yes/no", async (
 
 test("schedule install/status/remove works with mocked crontab", async () => {
   const stateDir = await mkTmpDir("schedule");
-  const backupDir = await mkTmpDir("schedule-backup");
+  const remoteBare = await mkTmpDir("schedule-remote");
+  const repoDir = await mkTmpDir("schedule-repo");
   const binDir = await mkTmpDir("schedule-bin");
   const fakeCrontab = path.join(binDir, "crontab");
   const crontabFile = path.join(binDir, "crontab.txt");
@@ -442,6 +475,9 @@ process.exit(2);
     { mode: 0o755 },
   );
   await writeStateFixture(stateDir);
+  await execFileAsync("git", ["init", "--bare"], { cwd: remoteBare });
+  const initResult = await runCli(["git", "init", "--repo-url", remoteBare, "--repo-dir", repoDir]);
+  assert.equal(initResult.code, 0, initResult.stderr);
 
   const env = {
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
@@ -456,8 +492,8 @@ process.exit(2);
       "1d",
       "--state-dir",
       stateDir,
-      "--to-dir",
-      backupDir,
+      "--repo-dir",
+      repoDir,
       "--ignore-paths",
       "workspace/cache,media",
       "--workspace-include-globs",
