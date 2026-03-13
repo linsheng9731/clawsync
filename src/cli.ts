@@ -179,6 +179,24 @@ function printPackReport(archivePath: string, manifest: Manifest): void {
   }
 }
 
+function printEnvRecoveryGuidance(manifest: Manifest, stateDir: string): void {
+  if (!manifest.sanitized) return;
+  console.log("env vars to restore:");
+  if (manifest.envVars.length === 0) {
+    console.log("- none");
+  } else {
+    for (const key of manifest.envVars) {
+      console.log(`- ${key}`);
+    }
+  }
+  if (!manifest.envScriptRelativePaths?.length) return;
+  const shPath = manifest.envScriptRelativePaths.find((rel) => rel.endsWith("env-export.sh"));
+  if (!shPath) return;
+  const absShPath = path.join(stateDir, shPath);
+  console.log("how to apply:");
+  console.log(`- bash/zsh: source "${absShPath}"`);
+}
+
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   const units = ["KB", "MB", "GB", "TB"];
@@ -370,6 +388,7 @@ program
       console.log("env scripts:");
       for (const rel of manifest.envScriptRelativePaths) console.log(`- ${rel}`);
     }
+    printEnvRecoveryGuidance(manifest, stateDir);
     printMergeReport(mergeReport);
   });
 
@@ -501,6 +520,7 @@ program
       console.log("env scripts:");
       for (const rel of manifest.envScriptRelativePaths) console.log(`- ${rel}`);
     }
+    printEnvRecoveryGuidance(manifest, targetStateDir);
     printMergeReport(mergeReport);
   });
 
@@ -524,6 +544,7 @@ program
       console.log("env scripts:");
       for (const rel of manifest.envScriptRelativePaths) console.log(`- ${rel}`);
     }
+    printEnvRecoveryGuidance(manifest, targetStateDir);
     printMergeReport(mergeReport);
   });
 

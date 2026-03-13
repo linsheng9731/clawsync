@@ -118,6 +118,11 @@ Pull from Git then unpack to local state.
 - `--strategy <mode>`: `overwrite|skip|merge`
 - `--env-script-dir <path>`: output path for env recovery scripts
 
+After `pull`, if the archive is sanitized, CLI prints:
+
+- `env vars to restore:`: list of variable names included in backup
+- `how to apply:`: shell command to load generated script (for example `source ".../env-export.sh"`)
+
 ### `clawsync merge`
 
 Same source options as `pull`, but always uses local-first merge behavior.
