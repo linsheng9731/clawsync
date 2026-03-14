@@ -23,6 +23,7 @@ interface FileConfig {
   exclude?: SyncComponent[];
   ignorePaths?: string[];
   workspaceIncludeGlobs?: string[];
+  includeAllWorkspaceFiles?: boolean;
   stateDir?: string;
   strategy?: UnpackStrategy;
   sanitize?: boolean;
@@ -93,6 +94,7 @@ export async function buildSyncConfig(options: {
   exclude?: string;
   ignorePaths?: string;
   workspaceIncludeGlobs?: string;
+  includeAllWorkspaceFiles?: boolean;
   strategy?: UnpackStrategy;
   sanitize?: boolean;
 }): Promise<SyncConfig> {
@@ -106,6 +108,7 @@ export async function buildSyncConfig(options: {
   const exclude = excludeFromCli ?? fileConfig.exclude ?? DEFAULT_EXCLUDE;
   const ignorePaths = ignorePathsFromCli ?? fileConfig.ignorePaths ?? [];
   const workspaceIncludeGlobs = workspaceIncludeGlobsFromCli ?? fileConfig.workspaceIncludeGlobs ?? [];
+  const includeAllWorkspaceFiles = options.includeAllWorkspaceFiles ?? fileConfig.includeAllWorkspaceFiles ?? false;
   const strategy = options.strategy ?? fileConfig.strategy ?? "overwrite";
   const sanitize = options.sanitize ?? fileConfig.sanitize ?? true;
 
@@ -115,6 +118,7 @@ export async function buildSyncConfig(options: {
     exclude,
     ignorePaths,
     workspaceIncludeGlobs,
+    includeAllWorkspaceFiles,
     strategy,
     format: "tar",
     sanitize,

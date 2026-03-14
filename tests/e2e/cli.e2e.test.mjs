@@ -96,6 +96,45 @@ async function httpGet(url) {
   });
 }
 
+async function httpRequest(url, options = {}) {
+  return new Promise((resolve, reject) => {
+    const requestUrl = new URL(url);
+    const req = http.request(
+      {
+        method: options.method ?? "GET",
+        hostname: requestUrl.hostname,
+        port: requestUrl.port,
+        path: `${requestUrl.pathname}${requestUrl.search}`,
+        headers: options.headers ?? {},
+      },
+      (res) => {
+        const chunks = [];
+        res.on("data", (chunk) => chunks.push(chunk));
+        res.on("end", () => {
+          resolve({
+            status: res.statusCode ?? 0,
+            body: Buffer.concat(chunks).toString("utf8"),
+            headers: res.headers,
+          });
+        });
+      },
+    );
+    req.on("error", reject);
+    if (options.body) req.write(options.body);
+    req.end();
+  });
+}
+
+function buildMultipartBody(fieldName, filename, content, boundary) {
+  const fileBuffer = Buffer.isBuffer(content) ? content : Buffer.from(content);
+  const prefix = Buffer.from(
+    `--${boundary}\r\nContent-Disposition: form-data; name="${fieldName}"; filename="${filename}"\r\nContent-Type: application/gzip\r\n\r\n`,
+    "utf8",
+  );
+  const suffix = Buffer.from(`\r\n--${boundary}--\r\n`, "utf8");
+  return Buffer.concat([prefix, fileBuffer, suffix]);
+}
+
 async function waitForHealth(port, maxAttempts = 20) {
   for (let i = 0; i < maxAttempts; i += 1) {
     try {
@@ -115,6 +154,15 @@ function matchLineValue(output, prefix) {
     .map((item) => item.trim())
     .find((item) => item.startsWith(prefix));
   return line ? line.slice(prefix.length).trim() : "";
+}
+
+function formatBranchDate(daysAgo) {
+  const now = new Date();
+  const target = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - daysAgo));
+  const y = String(target.getUTCFullYear());
+  const m = String(target.getUTCMonth() + 1).padStart(2, "0");
+  const d = String(target.getUTCDate()).padStart(2, "0");
+  return `${y}${m}${d}`;
 }
 
 async function setupGitBackupFromState(stateDir, branch = "main") {
@@ -159,11 +207,11 @@ test("scope shows default selected components", async () => {
 test("version command supports -v and verbose output", async () => {
   const shortVersion = await runCli(["--version"]);
   assert.equal(shortVersion.code, 0, shortVersion.stderr);
-  assert.match(shortVersion.stdout, /0\.1\.7/);
+  assert.match(shortVersion.stdout, /0\.1\.8/);
 
   const verboseVersion = await runCli(["version", "-v"]);
   assert.equal(verboseVersion.code, 0, verboseVersion.stderr);
-  assert.match(verboseVersion.stdout, /clawsync 0\.1\.7/);
+  assert.match(verboseVersion.stdout, /clawsync 0\.1\.8/);
   assert.match(verboseVersion.stdout, /node:\s+v\d+\.\d+\.\d+/);
   assert.match(verboseVersion.stdout, /platform:\s+\w+\/\w+/);
 });
@@ -387,6 +435,7 @@ test("profile full-migrate packs channels/devices/identity locally", async () =>
   assert.equal(existsSync(path.join(restoreDir, "devices", "paired.json")), true);
   assert.equal(existsSync(path.join(restoreDir, "identity", "device.json")), true);
   assert.equal(existsSync(path.join(restoreDir, "telegram", "offset.json")), true);
+  assert.equal(existsSync(path.join(restoreDir, "workspace", "project", "notes.txt")), true);
 });
 
 test("unpack preserves local gateway token by default", async () => {
@@ -470,6 +519,87 @@ test("serve supports token auth for archive list and download", async () => {
   }
 });
 
+test("serve supports upload and localhost backup/restore endpoints", async () => {
+  const stateDir = await mkTmpDir("serve-state");
+  const archiveDir = await mkTmpDir("serve-archives-extended");
+  const port = await getFreePort();
+  const token = "serve-full-test-token";
+  await writeStateFixture(stateDir);
+
+  const serverProc = spawn(
+    process.execPath,
+    [CLI_PATH, "serve", "--token", token, "--port", String(port), "--dir", archiveDir, "--state-dir", stateDir],
+    { cwd: ROOT, env: { ...process.env } },
+  );
+
+  try {
+    await waitForHealth(port);
+
+    const homeResponse = await httpGet(`http://127.0.0.1:${port}/?token=${token}`);
+    assert.equal(homeResponse.status, 200);
+    assert.match(homeResponse.body, /clawsync serve/);
+
+    const backupResponse = await httpRequest(`http://127.0.0.1:${port}/backup`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    assert.equal(backupResponse.status, 200, backupResponse.body);
+    const backupData = JSON.parse(backupResponse.body);
+    assert.match(backupData.filename, /\.tar\.gz$/);
+
+    await fs.writeFile(path.join(stateDir, "openclaw.json"), JSON.stringify({ changed: true }, null, 2), "utf8");
+
+    const dryRunResponse = await httpRequest(
+      `http://127.0.0.1:${port}/restore/${encodeURIComponent(backupData.filename)}?dry_run=1`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      },
+    );
+    assert.equal(dryRunResponse.status, 200, dryRunResponse.body);
+    assert.match(dryRunResponse.body, /dry run complete/);
+
+    const restoreResponse = await httpRequest(
+      `http://127.0.0.1:${port}/restore/${encodeURIComponent(backupData.filename)}?confirm=1`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      },
+    );
+    assert.equal(restoreResponse.status, 200, restoreResponse.body);
+    assert.match(restoreResponse.body, /restore complete/);
+
+    const restoredConfig = await fs.readFile(path.join(stateDir, "openclaw.json"), "utf8");
+    assert.doesNotMatch(restoredConfig, /"changed": true/);
+
+    const uploadBoundary = "----clawsync-boundary";
+    const uploadedName = "uploaded-test.tar.gz";
+    const uploadedBody = buildMultipartBody("archive", uploadedName, "uploaded-content", uploadBoundary);
+    const uploadResponse = await httpRequest(`http://127.0.0.1:${port}/upload`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": `multipart/form-data; boundary=${uploadBoundary}`,
+      },
+      body: uploadedBody,
+    });
+    assert.equal(uploadResponse.status, 200, uploadResponse.body);
+    assert.match(uploadResponse.body, /upload completed/);
+
+    const downloadUploaded = await httpGet(
+      `http://127.0.0.1:${port}/download/${encodeURIComponent(uploadedName)}?token=${token}`,
+    );
+    assert.equal(downloadUploaded.status, 200);
+    assert.equal(downloadUploaded.body, "uploaded-content");
+  } finally {
+    serverProc.kill("SIGTERM");
+    await Promise.race([
+      once(serverProc, "exit"),
+      new Promise((resolve) => setTimeout(resolve, 2000)),
+    ]);
+  }
+});
+
 test("push/pull with git backend and local bare remote", async () => {
   const stateDir = await mkTmpDir("git");
   const remoteBare = await mkTmpDir("git-remote");
@@ -518,6 +648,42 @@ test("push/pull with git backend and local bare remote", async () => {
   assert.ok(existsSync(path.join(restoreDir, "openclaw.json")));
 });
 
+test("push --keep prunes old archives in git repo", async () => {
+  const stateDir = await mkTmpDir("git-keep-state");
+  const remoteBare = await mkTmpDir("git-keep-remote");
+  const repoDir = await mkTmpDir("git-keep-repo");
+  await writeStateFixture(stateDir);
+  await execFileAsync("git", ["init", "--bare"], { cwd: remoteBare });
+  const initResult = await runCli(["git", "init", "--repo-url", remoteBare, "--repo-dir", repoDir]);
+  assert.equal(initResult.code, 0, initResult.stderr);
+
+  const firstPush = await runCli([
+    "push",
+    "--state-dir",
+    stateDir,
+    "--repo-dir",
+    repoDir,
+    "--keep",
+    "1",
+  ]);
+  assert.equal(firstPush.code, 0, firstPush.stderr);
+  await new Promise((resolve) => setTimeout(resolve, 1100));
+  await fs.writeFile(path.join(stateDir, "workspace", "config", "settings.json"), JSON.stringify({ v: 2 }, null, 2), "utf8");
+  const secondPush = await runCli([
+    "push",
+    "--state-dir",
+    stateDir,
+    "--repo-dir",
+    repoDir,
+    "--keep",
+    "1",
+  ]);
+  assert.equal(secondPush.code, 0, secondPush.stderr);
+
+  const archiveFiles = (await fs.readdir(path.join(repoDir, "archives"))).filter((name) => name.endsWith(".tar.gz"));
+  assert.equal(archiveFiles.length, 1);
+});
+
 test("push with git backend defaults branch to clawsync_<YYYYMMDD>", async () => {
   const stateDir = await mkTmpDir("git-default-branch");
   const remoteBare = await mkTmpDir("git-default-branch-remote");
@@ -563,6 +729,82 @@ test("git init can update origin for existing repo-dir", async () => {
   assert.equal(originUrl.stdout.trim(), remoteB);
 });
 
+test("git prune-branches supports dry-run and deletion by keep-days", async () => {
+  const stateDir = await mkTmpDir("git-prune-state");
+  const remoteBare = await mkTmpDir("git-prune-remote");
+  const repoDir = await mkTmpDir("git-prune-repo");
+  await writeStateFixture(stateDir);
+  await execFileAsync("git", ["init", "--bare"], { cwd: remoteBare });
+  const initResult = await runCli(["git", "init", "--repo-url", remoteBare, "--repo-dir", repoDir, "--branch", "main"]);
+  assert.equal(initResult.code, 0, initResult.stderr);
+
+  const oldBranch = `clawsync_${formatBranchDate(40)}`;
+  const recentBranch = `clawsync_${formatBranchDate(5)}`;
+  const oldPush = await runCli([
+    "push",
+    "--state-dir",
+    stateDir,
+    "--repo-dir",
+    repoDir,
+    "--branch",
+    oldBranch,
+  ]);
+  assert.equal(oldPush.code, 0, oldPush.stderr);
+  await new Promise((resolve) => setTimeout(resolve, 1100));
+  await fs.writeFile(path.join(stateDir, "workspace", "config", "prune-marker.json"), JSON.stringify({ ts: Date.now() }), "utf8");
+  const recentPush = await runCli([
+    "push",
+    "--state-dir",
+    stateDir,
+    "--repo-dir",
+    repoDir,
+    "--branch",
+    recentBranch,
+  ]);
+  assert.equal(recentPush.code, 0, recentPush.stderr);
+
+  const dryRun = await runCli([
+    "git",
+    "prune-branches",
+    "--repo-dir",
+    repoDir,
+    "--keep-days",
+    "30",
+    "--dry-run",
+  ]);
+  assert.equal(dryRun.code, 0, dryRun.stderr);
+  assert.match(dryRun.stdout, /mode: dry-run/);
+  assert.match(dryRun.stdout, new RegExp(oldBranch));
+  assert.doesNotMatch(dryRun.stdout, new RegExp(recentBranch));
+
+  const withoutYes = await runCli([
+    "git",
+    "prune-branches",
+    "--repo-dir",
+    repoDir,
+    "--keep-days",
+    "30",
+  ]);
+  assert.notEqual(withoutYes.code, 0);
+  assert.match(withoutYes.stderr, /Re-run with --yes/);
+
+  const applyResult = await runCli([
+    "git",
+    "prune-branches",
+    "--repo-dir",
+    repoDir,
+    "--keep-days",
+    "30",
+    "--yes",
+  ]);
+  assert.equal(applyResult.code, 0, applyResult.stderr);
+  assert.match(applyResult.stdout, /deleted:\s+1/);
+
+  const remoteHeads = await execFileAsync("git", ["ls-remote", "--heads", "origin"], { cwd: repoDir });
+  assert.doesNotMatch(remoteHeads.stdout, new RegExp(`refs/heads/${oldBranch}`));
+  assert.match(remoteHeads.stdout, new RegExp(`refs/heads/${recentBranch}`));
+});
+
 test("push to git without init shows guidance", async () => {
   const stateDir = await mkTmpDir("git-push-no-init-state");
   const repoDir = await mkTmpDir("git-push-no-init-repo");
@@ -595,12 +837,15 @@ test("dry-run preview works and reuse-message-channel validates yes/no", async (
     "--repo-dir",
     repoDir,
     "--dry-run",
+    "--keep",
+    "3",
     "--reuse-message-channel",
     "yes",
   ]);
   assert.equal(dryRun.code, 0, dryRun.stderr);
   assert.match(dryRun.stdout, /dry-run mode/);
   assert.match(dryRun.stdout, /target: git/);
+  assert.match(dryRun.stdout, /archive retention: keep latest 3/);
   assert.match(dryRun.stdout, /reuse message channel: yes/);
 
   const invalid = await runCli([
@@ -614,6 +859,18 @@ test("dry-run preview works and reuse-message-channel validates yes/no", async (
   ]);
   assert.notEqual(invalid.code, 0);
   assert.match(invalid.stderr, /Invalid value for --reuse-message-channel/);
+
+  const invalidKeep = await runCli([
+    "push",
+    "--state-dir",
+    stateDir,
+    "--repo-dir",
+    repoDir,
+    "--keep",
+    "0",
+  ]);
+  assert.notEqual(invalidKeep.code, 0);
+  assert.match(invalidKeep.stderr, /Invalid value for --keep/);
 });
 
 test("schedule install/status/remove works with mocked crontab", async () => {

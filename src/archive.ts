@@ -85,7 +85,7 @@ async function collectEntryFiles(
   const stat = await fs.stat(fullPath);
   if (stat.isFile()) {
     const portablePath = toPortablePath(relPath);
-    if (entry.component === "workspace") {
+    if (entry.component === "workspace" && !config.includeAllWorkspaceFiles) {
       const whitelistedByDefault = isWorkspaceWhitelistedByDefault(portablePath);
       const whitelistedByUserRule = matchesWorkspaceIncludeRule(portablePath, config.workspaceIncludeGlobs);
       if (!whitelistedByDefault && !whitelistedByUserRule) {
@@ -102,7 +102,12 @@ async function collectEntryFiles(
   const files: PackScanItem[] = [];
   const hasWorkspaceUserRules = config.workspaceIncludeGlobs.length > 0;
   for (const child of children) {
-    if (entry.component === "workspace" && relPath === entry.relPath && !hasWorkspaceUserRules) {
+    if (
+      entry.component === "workspace" &&
+      !config.includeAllWorkspaceFiles &&
+      relPath === entry.relPath &&
+      !hasWorkspaceUserRules
+    ) {
       if (!WORKSPACE_DEFAULT_WHITELIST_DIRS.has(child)) {
         continue;
       }
@@ -188,6 +193,9 @@ function buildPackDecision(item: PackScanItem, config: SyncConfig): PackScanDeci
     return { ...item, action: "ignored-by-config" };
   }
   if (item.component === "workspace") {
+    if (config.includeAllWorkspaceFiles) {
+      return { ...item, action: "included-default" };
+    }
     if (isWorkspaceWhitelistedByDefault(item.relPath)) {
       return { ...item, action: "included-config" };
     }

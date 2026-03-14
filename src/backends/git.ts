@@ -30,6 +30,28 @@ export function getDefaultGitPushBranch(): string {
   return defaultPushBranch();
 }
 
+function parseClawsyncBranchDate(branchName: string): Date | null {
+  const match = /^clawsync_(\d{4})(\d{2})(\d{2})$/.exec(branchName);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) return null;
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (Number.isNaN(date.getTime())) return null;
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return null;
+  return date;
+}
+
+function startOfUtcDay(input: Date): Date {
+  return new Date(Date.UTC(input.getUTCFullYear(), input.getUTCMonth(), input.getUTCDate()));
+}
+
+function diffUtcDays(later: Date, earlier: Date): number {
+  const ms = startOfUtcDay(later).getTime() - startOfUtcDay(earlier).getTime();
+  return Math.floor(ms / (24 * 60 * 60 * 1000));
+}
+
 async function ensureBranch(git: SimpleGit, branch: string): Promise<void> {
   const local = await git.branchLocal();
   if (local.all.includes(branch)) {
@@ -126,7 +148,7 @@ export async function canPushToGit(options: { repoDir?: string }): Promise<{ rep
 
 export async function pushToGit(
   archivePath: string,
-  options: { repoDir?: string; repoUrl?: string; branch?: string },
+  options: { repoDir?: string; repoUrl?: string; branch?: string; keepArchives?: number },
 ): Promise<string> {
   const repoDir = path.resolve(options.repoDir || defaultRepoDir());
   const branch = options.branch || defaultPushBranch();
@@ -157,6 +179,22 @@ export async function pushToGit(
   const target = path.join(repoDir, "archives", name);
   await fs.copyFile(archivePath, target);
   await fs.writeFile(path.join(repoDir, "latest.txt"), `archives/${name}\n`, "utf8");
+
+  if (options.keepArchives !== undefined) {
+    const keep = options.keepArchives;
+    if (!Number.isInteger(keep) || keep <= 0) {
+      throw new Error(`Invalid keep value: ${keep}. Use a positive integer.`);
+    }
+    const archivesDir = path.join(repoDir, "archives");
+    const archiveNames = (await fs.readdir(archivesDir))
+      .filter((item) => item.endsWith(".tar.gz"))
+      .sort()
+      .reverse();
+    const toRemove = archiveNames.slice(keep);
+    for (const oldName of toRemove) {
+      await fs.remove(path.join(archivesDir, oldName));
+    }
+  }
 
   await git.add(["archives", "latest.txt"]);
   const status = await git.status();
@@ -202,4 +240,66 @@ export async function pullFromGit(
     throw new Error(`Archive referenced by latest.txt does not exist: ${archivePath}`);
   }
   return archivePath;
+}
+
+export async function pruneRemoteClawsyncBranches(options: {
+  repoDir?: string;
+  repoUrl?: string;
+  keepDays: number;
+  apply: boolean;
+  now?: Date;
+}): Promise<{
+  keepDays: number;
+  scannedRemoteBranches: number;
+  candidates: string[];
+  deleted: string[];
+}> {
+  if (!Number.isInteger(options.keepDays) || options.keepDays <= 0) {
+    throw new Error(`Invalid keepDays value: ${options.keepDays}. Use a positive integer.`);
+  }
+
+  const repoDir = path.resolve(options.repoDir || defaultRepoDir());
+  const git = await ensureRepo(repoDir, options.repoUrl, "main");
+  const remotes = await git.getRemotes(true);
+  const hasOrigin = remotes.some((r: { name: string }) => r.name === "origin");
+  if (!hasOrigin) {
+    throw new Error(
+      `Git remote 'origin' is not configured in ${repoDir}. Run: clawsync git init --repo-url <your-repo-url> --repo-dir ${repoDir}`,
+    );
+  }
+
+  const raw = await git.listRemote(["--heads", "origin"]);
+  const remoteBranches = raw
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => line.split(/\s+/)[1] ?? "")
+    .filter((ref) => ref.startsWith("refs/heads/"))
+    .map((ref) => ref.replace("refs/heads/", ""));
+
+  const now = options.now ?? new Date();
+  const candidates: string[] = [];
+  for (const branch of remoteBranches) {
+    const parsedDate = parseClawsyncBranchDate(branch);
+    if (!parsedDate) continue;
+    const ageDays = diffUtcDays(now, parsedDate);
+    if (ageDays > options.keepDays) {
+      candidates.push(branch);
+    }
+  }
+
+  const deleted: string[] = [];
+  if (options.apply) {
+    for (const branch of candidates) {
+      await git.push(["origin", "--delete", branch]);
+      deleted.push(branch);
+    }
+  }
+
+  return {
+    keepDays: options.keepDays,
+    scannedRemoteBranches: remoteBranches.length,
+    candidates,
+    deleted,
+  };
 }

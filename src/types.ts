@@ -15,6 +15,7 @@ export interface SyncConfig {
   exclude: SyncComponent[];
   ignorePaths: string[];
   workspaceIncludeGlobs: string[];
+  includeAllWorkspaceFiles: boolean;
   strategy: UnpackStrategy;
   format: "tar";
   sanitize: boolean;

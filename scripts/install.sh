@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="${CLAWSYNC_GH_REPO:-damon/clawsync}"
+REPO="${CLAWSYNC_GH_REPO:-linsheng9731/clawsync}"
 VERSION="${1:-latest}"
 INSTALL_DIR="${CLAWSYNC_INSTALL_DIR:-$HOME/.local/bin}"
 

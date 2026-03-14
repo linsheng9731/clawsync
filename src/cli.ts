@@ -15,6 +15,7 @@ import {
   getDefaultGitPushBranch,
   getDefaultGitRepoDir,
   initGitRepo,
+  pruneRemoteClawsyncBranches,
   pushToGit,
   pullFromGit,
 } from "./backends/git.js";
@@ -59,6 +60,15 @@ function parseYesNoOption(raw: string | undefined, optionName: string): boolean 
   if (normalized === "yes") return true;
   if (normalized === "no") return false;
   throw new Error(`Invalid value for ${optionName}: ${raw}. Allowed values: yes, no`);
+}
+
+function parsePositiveIntOption(raw: string | undefined, optionName: string): number | undefined {
+  if (raw === undefined) return undefined;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`Invalid value for ${optionName}: ${raw}. Use a positive integer.`);
+  }
+  return value;
 }
 
 const FULL_MIGRATE_COMPONENTS = [
@@ -199,6 +209,7 @@ function buildPushArgsFromOptions(opts: {
   sanitize?: boolean;
   repoDir?: string;
   branch?: string;
+  keep?: string;
   reuseMessageChannel?: string;
 }): string[] {
   const args: string[] = [];
@@ -211,6 +222,7 @@ function buildPushArgsFromOptions(opts: {
   if (opts.sanitize === false) args.push("--no-sanitize");
   appendArg(args, "--repo-dir", opts.repoDir);
   appendArg(args, "--branch", opts.branch);
+  appendArg(args, "--keep", opts.keep);
   appendArg(args, "--reuse-message-channel", opts.reuseMessageChannel);
   return args;
 }
@@ -231,6 +243,7 @@ function buildScheduleHintCommand(opts: {
   sanitize?: boolean;
   repoDir?: string;
   branch?: string;
+  keep?: string;
   reuseMessageChannel?: string;
 }): string {
   const pushArgs = buildPushArgsFromOptions(opts);
@@ -248,6 +261,7 @@ async function maybePrintScheduleGuidance(opts: {
   sanitize?: boolean;
   repoDir?: string;
   branch?: string;
+  keep?: string;
   reuseMessageChannel?: string;
 }): Promise<void> {
   try {
@@ -430,14 +444,14 @@ async function chooseLargestItemsToIgnore(
 program
   .name("clawsync")
   .description("Sync OpenClaw config/state with Git backend")
-  .version("0.1.7", "--version", "output the current version");
+  .version("0.1.8", "--version", "output the current version");
 
 program
   .command("version")
   .description("Show version information")
   .option("-v, --verbose", "show runtime details")
   .action((opts) => {
-    console.log("clawsync 0.1.7");
+    console.log("clawsync 0.1.8");
     if (!opts.verbose) return;
     console.log(`node: ${process.version}`);
     console.log(`platform: ${process.platform}/${process.arch}`);
@@ -463,6 +477,42 @@ gitProgram
     console.log(`branch: ${result.branch}`);
   });
 
+gitProgram
+  .command("prune-branches")
+  .description("Prune old remote clawsync_<YYYYMMDD> branches by retention days")
+  .option("--repo-dir <path>", "local git repo directory")
+  .option("--repo-url <url>", "git remote origin url (used when repo-dir needs initialization)")
+  .option("--keep-days <days>", "keep branches within latest N days", "30")
+  .option("--dry-run", "preview branches that would be deleted")
+  .option("--yes", "apply deletion of candidate branches")
+  .action(async (opts) => {
+    const keepDays = parsePositiveIntOption(opts.keepDays, "--keep-days");
+    if (keepDays === undefined) {
+      throw new Error("--keep-days is required");
+    }
+    const apply = !opts.dryRun;
+    if (apply && !opts.yes) {
+      throw new Error("Refusing to delete remote branches without confirmation. Re-run with --yes, or use --dry-run.");
+    }
+    const result = await pruneRemoteClawsyncBranches({
+      repoDir: opts.repoDir,
+      repoUrl: opts.repoUrl,
+      keepDays,
+      apply,
+    });
+    console.log(`retention days: ${result.keepDays}`);
+    console.log(`scanned remote branches: ${result.scannedRemoteBranches}`);
+    console.log(`delete candidates: ${result.candidates.length}`);
+    if (result.candidates.length > 0) {
+      result.candidates.forEach((branch) => console.log(`- ${branch}`));
+    }
+    if (opts.dryRun) {
+      console.log("mode: dry-run (no branches deleted)");
+    } else {
+      console.log(`deleted: ${result.deleted.length}`);
+    }
+  });
+
 const profileProgram = program.command("profile").description("Run predefined backup profiles");
 
 profileProgram
@@ -484,6 +534,7 @@ profileProgram
       ...cfg,
       include: [...FULL_MIGRATE_COMPONENTS],
       exclude: [],
+      includeAllWorkspaceFiles: true,
       sanitize: opts.sanitize ? true : false,
     };
     if (opts.dryRun) {
@@ -504,26 +555,39 @@ profileProgram
     printPackReport(result.archivePath, result.manifest);
   });
 
-program
-  .command("serve")
-  .description("Serve local archives via HTTP with token authentication")
-  .requiredOption("--token <secret>", "access token for API requests")
-  .option("--port <port>", "server port", "7373")
-  .option("--dir <path>", "archive directory to serve")
-  .option("--state-dir <path>", "OpenClaw state dir; default ~/.openclaw or OPENCLAW_STATE_DIR")
-  .action(async (opts) => {
-    const stateDir = resolveStateDir(opts.stateDir);
-    const archiveDir = opts.dir ? path.resolve(opts.dir) : path.join(stateDir, "migrations");
-    const parsedPort = Number(opts.port);
-    if (!Number.isInteger(parsedPort) || parsedPort <= 0 || parsedPort > 65535) {
-      throw new Error(`Invalid --port value: ${opts.port}`);
-    }
-    await runArchiveServer({
-      token: opts.token,
-      port: parsedPort,
-      archiveDir,
-    });
+commonOptions(
+  program
+    .command("serve")
+    .description("Serve local archives via HTTP with token authentication")
+    .requiredOption("--token <secret>", "access token for API requests")
+    .option("--port <port>", "server port", "7373")
+    .option("--dir <path>", "archive directory to serve")
+    .option("--strategy <mode>", "default restore strategy for /restore", "overwrite")
+    .option("--env-script-dir <path>", "directory to write env-export scripts when restoring")
+    .option("--overwrite-gateway-token", "use token from backup openclaw.json when restoring via /restore")
+).action(async (opts) => {
+  const cfg = await buildSyncConfig(opts);
+  const stateDir = cfg.stateDir;
+  const archiveDir = opts.dir ? path.resolve(opts.dir) : path.join(stateDir, "migrations");
+  const parsedPort = Number(opts.port);
+  if (!Number.isInteger(parsedPort) || parsedPort <= 0 || parsedPort > 65535) {
+    throw new Error(`Invalid --port value: ${opts.port}`);
+  }
+  const strategy = opts.strategy as UnpackStrategy;
+  if (!["overwrite", "skip", "merge"].includes(strategy)) {
+    throw new Error(`Invalid --strategy value: ${opts.strategy}. Allowed: overwrite|skip|merge`);
+  }
+  await runArchiveServer({
+    token: opts.token,
+    port: parsedPort,
+    archiveDir,
+    backupConfig: cfg,
+    restoreStateDir: stateDir,
+    restoreStrategy: strategy,
+    envScriptDir: opts.envScriptDir,
+    preserveGatewayToken: !opts.overwriteGatewayToken,
   });
+});
 
 commonOptions(
   program
@@ -642,10 +706,12 @@ commonOptions(
     .description("Pack then push to git backend")
     .option("--repo-dir <path>", "local git repo directory")
     .option("--branch <name>", "git branch; default clawsync_<YYYYMMDD>")
+    .option("--keep <count>", "keep latest N archives in git repo after push")
     .option("--reuse-message-channel <mode>", "reuse OpenClaw message channel: yes|no")
     .option("--dry-run", "preview selected files and sanitization without pushing")
 ).action(async (opts) => {
   const reuseMessageChannel = parseYesNoOption(opts.reuseMessageChannel, "--reuse-message-channel");
+  const keepArchives = parsePositiveIntOption(opts.keep, "--keep");
   await ensureGitPushTargetReady(opts.repoDir);
   const cfg = await buildSyncConfig(opts);
   if (opts.dryRun) {
@@ -666,12 +732,16 @@ commonOptions(
     if (reuseMessageChannel !== undefined) {
       console.log(`reuse message channel: ${reuseMessageChannel ? "yes" : "no"}`);
     }
+    if (keepArchives !== undefined) {
+      console.log(`archive retention: keep latest ${keepArchives}`);
+    }
     return;
   }
   const { archivePath } = await packState(cfg);
   const repoPath = await pushToGit(archivePath, {
     repoDir: opts.repoDir,
     branch: opts.branch,
+    keepArchives,
   });
   console.log(`pushed to git repo: ${repoPath}`);
   await maybePrintScheduleGuidance(opts);
@@ -688,9 +758,11 @@ commonOptions(
     .requiredOption("--every <interval>", "interval like 30m, 2h, 1d")
     .option("--repo-dir <path>", "local git repo directory")
     .option("--branch <name>", "git branch; default clawsync_<YYYYMMDD>")
+    .option("--keep <count>", "keep latest N archives in git repo after each push")
     .option("--reuse-message-channel <mode>", "reuse OpenClaw message channel in notifications: yes|no")
 ).action(async (opts) => {
   parseYesNoOption(opts.reuseMessageChannel, "--reuse-message-channel");
+  parsePositiveIntOption(opts.keep, "--keep");
   await ensureGitPushTargetReady(opts.repoDir);
 
   const cronExpression = parseInterval(opts.every);
