@@ -18,6 +18,31 @@ metadata:
 
 `clawsync` provides backup/migration workflows for OpenClaw with Git-native sync and safer restore behavior.
 
+## Install
+
+### One-click install (GitHub Releases)
+
+```bash
+curl -fsSL "https://raw.githubusercontent.com/linsheng9731/clawsync/main/scripts/install.sh" | CLAWSYNC_GH_REPO="linsheng9731/clawsync" bash
+```
+
+Install a specific version:
+
+```bash
+curl -fsSL "https://raw.githubusercontent.com/linsheng9731/clawsync/main/scripts/install.sh" | CLAWSYNC_GH_REPO="linsheng9731/clawsync" bash -s -- v0.1.8
+```
+
+Default install path: `~/.local/bin/clawsync` (override with `CLAWSYNC_INSTALL_DIR`). Ensure this path is in your `PATH`.
+
+### Local development install
+
+```bash
+npm install
+npm run build
+npm link
+clawsync --help
+```
+
 ## Feature Highlights
 
 - **More complete Git-native workflow**: first-class `clawsync git init`, `push`, `pull`, and `merge` commands for branch-based backup and restore.
