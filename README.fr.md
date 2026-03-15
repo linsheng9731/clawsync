@@ -4,6 +4,8 @@
 
 Synchronisez l'état OpenClaw avec un workflow Git-first, plus la sauvegarde locale, la migration et la restauration sécurisée.
 
+**Auteur (X):** [@shngshngln86211](https://x.com/shngshngln86211)
+
 ## Points forts
 
 - **Workflow Git natif complet** : commandes `git init`, `push`, `pull` et `merge` (local-first) intégrées.

@@ -4,6 +4,8 @@
 
 使用 Git-first 工作流同步 OpenClaw 状态，并支持本地打包、迁移与安全恢复。
 
+**作者 (X):** [@shngshngln86211](https://x.com/shngshngln86211)
+
 ## 功能亮点
 
 - **更完整的 Git 原生流程**：内置 `git init`、`push`、`pull`、本地优先 `merge`，通过分支完成可追溯的备份/恢复。

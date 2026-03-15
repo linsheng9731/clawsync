@@ -4,6 +4,8 @@
 
 OpenClaw の状態を Git-first ワークフローで同期し、ローカルアーカイブ、移行、安全な復元を実現します。
 
+**作者 (X):** [@shngshngln86211](https://x.com/shngshngln86211)
+
 ## 主な機能
 
 - **Git ネイティブな運用**: `git init`、`push`、`pull`、ローカル優先の `merge` を標準搭載。

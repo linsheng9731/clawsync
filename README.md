@@ -4,6 +4,8 @@
 
 Sync OpenClaw state with a Git-only backup workflow.
 
+**Author (X):** [@shngshngln86211](https://x.com/shngshngln86211)
+
 ## Feature Highlights
 
 - **More complete Git-native workflow**: built-in `git init`, `push`, `pull`, and local-first `merge`, with branch-based backup/restore flow for traceable sync history.

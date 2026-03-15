@@ -18,6 +18,9 @@ metadata:
 
 `clawsync` provides backup/migration workflows for OpenClaw with Git-native sync and safer restore behavior.
 
+**Repository:** https://github.com/linsheng9731/clawsync  
+**Author (X):** [@shngshngln86211](https://x.com/shngshngln86211)
+
 ## Install
 
 ### One-click install (GitHub Releases)

@@ -4,6 +4,8 @@
 
 Синхронизируйте состояние OpenClaw через Git-first workflow: локальные архивы, миграция и безопасное восстановление.
 
+**Автор (X):** [@shngshngln86211](https://x.com/shngshngln86211)
+
 ## Ключевые возможности
 
 - **Полноценный Git-native поток**: встроены `git init`, `push`, `pull` и local-first `merge`.

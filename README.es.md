@@ -4,6 +4,8 @@
 
 Sincroniza el estado de OpenClaw con un flujo Git-first, respaldo local, migración y restauración segura.
 
+**Autor (X):** [@shngshngln86211](https://x.com/shngshngln86211)
+
 ## Características destacadas
 
 - **Flujo Git nativo más completo**: incluye `git init`, `push`, `pull` y `merge` (local-first).
